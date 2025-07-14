@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 import re
 from dateutil.parser import parse as parse_datetime
+from tqdm import tqdm
+import ijson  # For streaming JSON parsing
 
 from .models import (
     FitbitUserData, ActivityData, SleepData, DailyMetrics, BodyComposition,
