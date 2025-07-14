@@ -1,0 +1,2 @@
+[console_scripts]
+fitbit2garmin = fitbit2garmin.cli:main

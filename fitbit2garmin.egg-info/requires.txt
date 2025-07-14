@@ -1,0 +1,9 @@
+gpxpy>=1.5.0
+fit-tool>=0.9.0
+tcxreader>=0.4.0
+pandas>=2.0.0
+requests>=2.31.0
+click>=8.1.0
+python-dateutil>=2.8.0
+tqdm>=4.66.0
+pydantic>=2.0.0

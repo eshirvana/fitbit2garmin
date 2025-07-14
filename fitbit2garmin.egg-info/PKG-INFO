@@ -1,0 +1,232 @@
+Metadata-Version: 2.4
+Name: fitbit2garmin
+Version: 1.0.0
+Summary: Convert Fitbit Google Takeout data to Garmin Connect compatible formats
+Project-URL: Homepage, https://github.com/user/fitbit2garmin
+Project-URL: Repository, https://github.com/user/fitbit2garmin
+Project-URL: Issues, https://github.com/user/fitbit2garmin/issues
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: End Users/Desktop
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: gpxpy>=1.5.0
+Requires-Dist: fit-tool>=0.9.0
+Requires-Dist: tcxreader>=0.4.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: requests>=2.31.0
+Requires-Dist: click>=8.1.0
+Requires-Dist: python-dateutil>=2.8.0
+Requires-Dist: tqdm>=4.66.0
+Requires-Dist: pydantic>=2.0.0
+
+# Fitbit to Garmin Migration Tool
+
+A comprehensive Python tool for converting Fitbit Google Takeout data to Garmin Connect compatible formats, maximizing data preservation across all available metrics.
+
+## Features
+
+- **Comprehensive Data Support**: Converts 15+ data types from Fitbit including activities, sleep, heart rate, body composition, and daily metrics
+- **Multiple Export Formats**: Supports CSV, TCX, GPX, and FIT formats
+- **Batch Processing**: Handles years of historical data efficiently
+- **Data Validation**: Ensures integrity throughout the conversion process
+- **Garmin Integration**: Generates files ready for Garmin Connect import
+- **Command Line Interface**: Easy-to-use CLI with progress tracking
+
+## Supported Data Types
+
+### ✅ Fully Supported
+- **Activities**: GPS tracks, exercise sessions (TCX/GPX export)
+- **Daily Metrics**: Steps, calories, distance, floors (CSV export)
+- **Body Composition**: Weight, BMI, body fat percentage (CSV export)
+- **Sleep Data**: Duration, stages, sleep score (CSV export)
+- **Heart Rate**: Continuous HR, resting HR (CSV export)
+
+### ⚠️ Partially Supported
+- **Heart Rate Variability**: Sleep HRV data
+- **Stress Scores**: Daily stress levels
+- **Active Zone Minutes**: Cardio/peak minutes
+
+### 🔄 Planned
+- **FIT File Generation**: Advanced sensor data export
+- **Temperature Data**: Skin temperature variations
+- **SpO2 Data**: Blood oxygen levels
+
+## Installation
+
+### Requirements
+- Python 3.9 or higher
+- pip (Python package installer)
+
+### Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### Development Installation
+```bash
+pip install -e .
+```
+
+## Usage
+
+### 1. Export Your Fitbit Data
+1. Go to [Google Takeout](https://takeout.google.com/)
+2. Select only "Fitbit" data
+3. Choose your export format (ZIP recommended)
+4. Download and extract the archive
+
+### 2. Convert Your Data
+
+#### Basic Conversion
+```bash
+fitbit2garmin convert path/to/Takeout
+```
+
+#### Specify Output Directory
+```bash
+fitbit2garmin convert path/to/Takeout --output-dir ./my-garmin-data
+```
+
+#### Choose Export Formats
+```bash
+fitbit2garmin convert path/to/Takeout --format csv --format tcx --format gpx
+```
+
+#### Export Only Activities
+```bash
+fitbit2garmin convert path/to/Takeout --activities-only
+```
+
+#### Export Only Daily Metrics
+```bash
+fitbit2garmin convert path/to/Takeout --daily-only
+```
+
+### 3. Analyze Your Data (Optional)
+```bash
+fitbit2garmin analyze path/to/Takeout
+```
+
+### 4. Get Help
+```bash
+fitbit2garmin --help
+fitbit2garmin convert --help
+fitbit2garmin info
+```
+
+## Output Files
+
+### CSV Files (Daily Data)
+- `fitbit_steps.csv` - Daily step counts
+- `fitbit_distance.csv` - Daily distance traveled
+- `fitbit_calories.csv` - Daily calories burned
+- `fitbit_sleep.csv` - Sleep duration and quality
+- `fitbit_heart_rate.csv` - Daily heart rate summaries
+- `fitbit_body_composition.csv` - Weight and body metrics
+- `garmin_connect_import.csv` - Combined file for Garmin Connect import
+
+### Activity Files
+- `activity_*.tcx` - Individual activities in TCX format
+- `activity_*.gpx` - GPS activities in GPX format
+
+## Importing to Garmin Connect
+
+### Method 1: Manual Upload (Recommended)
+1. Log into [Garmin Connect](https://connect.garmin.com/)
+2. Go to "Import Data" in the menu
+3. Upload CSV files for daily metrics
+4. Upload TCX/GPX files for individual activities
+
+### Method 2: Bulk Import
+1. Use the generated `garmin_connect_import.csv` file
+2. Upload via Garmin Connect's bulk import feature
+3. Note: May have limitations on data types
+
+## Data Quality and Limitations
+
+### What Transfers Well
+- ✅ Daily step counts and distance
+- ✅ Sleep duration and efficiency
+- ✅ Body weight and composition
+- ✅ Activity GPS tracks and heart rate
+- ✅ Exercise summaries and calories
+
+### Known Limitations
+- ⚠️ Heart rate variability data is limited to sleep periods
+- ⚠️ Stress data may not be fully compatible
+- ⚠️ Some Fitbit-specific metrics don't have Garmin equivalents
+- ⚠️ Time zones may need manual adjustment
+
+## Troubleshooting
+
+### Common Issues
+
+**"Fitbit data not found"**
+- Ensure you've extracted the Google Takeout archive
+- Check that the path contains `Takeout/Fitbit/` directory
+
+**"No data found to convert"**
+- Verify your Fitbit account had data in the export period
+- Check that JSON files exist in the Fitbit directory
+
+**"Import failed in Garmin Connect"**
+- Try uploading files in smaller batches
+- Ensure date formats match your Garmin Connect region settings
+
+### Getting Help
+- Check the `--verbose` flag for detailed logging
+- Use `fitbit2garmin analyze` to inspect your data
+- Review the generated files before uploading
+
+## Development
+
+### Project Structure
+```
+fitbit2garmin/
+├── models.py          # Data models using Pydantic
+├── parser.py          # Fitbit JSON data parser
+├── converter.py       # Data format converters
+├── exporter.py        # CSV and file exporters
+├── cli.py            # Command-line interface
+└── __init__.py       # Package initialization
+```
+
+### Running Tests
+```bash
+python -m pytest tests/
+```
+
+### Code Style
+```bash
+black fitbit2garmin/
+flake8 fitbit2garmin/
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Submit a pull request
+
+## License
+
+MIT License - see LICENSE file for details
+
+## Acknowledgments
+
+- Fitbit for providing data export functionality
+- Garmin for supporting data import
+- The open-source community for GPX, TCX, and FIT libraries
+
+## Disclaimer
+
+This tool is not affiliated with Fitbit or Garmin. Use at your own risk and always backup your data before migration.
