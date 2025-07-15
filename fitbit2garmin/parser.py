@@ -74,6 +74,9 @@ class FitbitParser:
         if self.enable_parallel:
             self.parallel_processor = ParallelProcessor(max_workers)
 
+        # Memory management
+        self.memory_limit_mb = 1024  # 1GB memory limit
+
         # Discover all subdirectories
         self.data_directories = self._discover_data_directories()
 
@@ -111,6 +114,27 @@ class FitbitParser:
             f"Discovered {len(directories)} data directories: {list(directories.keys())}"
         )
         return directories
+
+    def _check_memory_usage(self) -> bool:
+        """Check if memory usage is within limits."""
+        try:
+            import psutil
+
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+
+            if memory_mb > self.memory_limit_mb:
+                logger.warning(
+                    f"Memory usage ({memory_mb:.1f}MB) exceeds limit ({self.memory_limit_mb}MB)"
+                )
+                return False
+            return True
+        except ImportError:
+            # psutil not available, assume memory is OK
+            return True
+        except Exception:
+            # Error checking memory, assume it's OK
+            return True
 
     def _enhance_heart_rate_zones(self, user_data: FitbitUserData) -> FitbitUserData:
         """Enhance heart rate zones with advanced calculations and Garmin compatibility."""
@@ -192,23 +216,47 @@ class FitbitParser:
         """Parse JSON file efficiently, using streaming for large files."""
         file_size = file_path.stat().st_size
 
+        # Skip extremely large files
+        if file_size > 50 * 1024 * 1024:  # 50MB limit
+            logger.warning(f"Skipping very large file {file_path} ({file_size / (1024*1024):.1f}MB)")
+            return []
+
         # Use streaming parser for files larger than 10MB
         if file_size > 10 * 1024 * 1024:  # 10MB
+            logger.debug(f"Using streaming parser for large file {file_path} ({file_size / (1024*1024):.1f}MB)")
             try:
                 with open(file_path, "rb") as f:
                     # For large files, try to stream parse as array
                     items = []
-                    parser = ijson.items(f, "item")
-                    for item in parser:
-                        items.append(item)
+                    try:
+                        parser = ijson.items(f, "item")
+                        for item in parser:
+                            items.append(item)
+                            # Limit memory usage
+                            if len(items) > 10000:  # Process in chunks
+                                break
+                    except ijson.JSONError:
+                        # If ijson fails, fall back to reading entire file
+                        f.seek(0)
+                        import orjson
+                        data = orjson.loads(f.read())
+                        if isinstance(data, list):
+                            items = data
+                        else:
+                            items = [data]
                     return items
-            except (ijson.JSONError, ValueError):
+            except (ijson.JSONError, ValueError, Exception) as e:
+                logger.warning(f"Streaming parser failed for {file_path}: {e}, trying standard parser")
                 # Fallback to regular parsing if streaming fails
                 pass
 
         # Regular JSON parsing for smaller files or when streaming fails
-        with open(file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Error parsing JSON file {file_path}: {e}")
+            return []
 
     def parse_all_data(self) -> FitbitUserData:
         """Parse all available Fitbit data and return structured data."""
@@ -299,7 +347,11 @@ class FitbitParser:
         # Optional: Limit processing for performance
         # activity_files = activity_files[:10]  # Uncomment to process only first 10 files
 
-        with tqdm(total=len(activity_files), desc="    🏃 Processing activity files", leave=False) as pbar:
+        with tqdm(
+            total=len(activity_files),
+            desc="    🏃 Processing activity files",
+            leave=False,
+        ) as pbar:
             for json_file in activity_files:
                 pbar.set_description(f"    🏃 Processing {json_file.name}")
                 try:
@@ -378,7 +430,11 @@ class FitbitParser:
             has_gps = gps_data is not None and len(gps_data) > 0 if gps_data else False
             manual_values_specified = data.get("manualValuesSpecified")
             source_data = data.get("source")
-            source = json.dumps(source_data) if isinstance(source_data, dict) else source_data
+            source = (
+                json.dumps(source_data)
+                if isinstance(source_data, dict)
+                else source_data
+            )
             is_favorite = data.get("isFavorite")
             activity_parent_id = data.get("activityParentId")
             activity_parent_name = data.get("activityParentName")
@@ -639,7 +695,11 @@ class FitbitParser:
                 )
 
                 # Process JSON files
-                with tqdm(total=len(sleep_files), desc="    😴 Processing sleep files", leave=False) as pbar:
+                with tqdm(
+                    total=len(sleep_files),
+                    desc="    😴 Processing sleep files",
+                    leave=False,
+                ) as pbar:
                     for json_file in sleep_files:
                         pbar.set_description(f"    😴 Processing {json_file.name}")
                         try:
@@ -864,7 +924,11 @@ class FitbitParser:
 
         print(f"    📋 Found {len(daily_files)} daily metrics files")
 
-        with tqdm(total=len(daily_files), desc="    📄 Processing daily metrics files", leave=False) as pbar:
+        with tqdm(
+            total=len(daily_files),
+            desc="    📄 Processing daily metrics files",
+            leave=False,
+        ) as pbar:
             for json_file in daily_files:
                 pbar.set_description(f"    📄 Processing {json_file.name}")
                 try:
@@ -931,44 +995,144 @@ class FitbitParser:
             # Optional: Limit processing for performance
             # hr_files = hr_files[:10]  # Uncomment to process only first 10 files
 
-            if self.enable_parallel and len(hr_files) > 2:
-                # Use parallel processing for large number of files
+            # Use parallel processing only for very large datasets and when enabled
+            # Also check memory usage to prevent system overload
+            use_parallel = (
+                self.enable_parallel
+                and len(hr_files) > 50
+                and self._check_memory_usage()
+            )
+            
+            # Report memory and processing information
+            import psutil
+            import time
+            start_time = time.time()
+            
+            try:
+                memory_gb = psutil.virtual_memory().available / (1024**3)
+                total_size_mb = sum(f.stat().st_size for f in hr_files) / (1024**2)
+                logger.info(f"Heart rate processing: {len(hr_files)} files, {total_size_mb:.1f}MB total, {memory_gb:.1f}GB available memory")
+                print(f"    📊 {len(hr_files)} files ({total_size_mb:.1f}MB), {memory_gb:.1f}GB available memory")
+            except:
+                logger.info(f"Heart rate processing: {len(hr_files)} files")
+                print(f"    📊 {len(hr_files)} files to process")
+
+            if use_parallel:
                 print("    🚀 Using parallel processing for heart rate data")
+                # Use smaller chunks to reduce memory usage
+                chunk_size = min(
+                    20, max(1, len(hr_files) // 20)
+                )  # Smaller chunks for better memory management
+                import gc
 
-                # Process files in chunks to manage memory
-                all_file_data = self.parallel_processor.process_in_chunks(
-                    hr_files,
-                    process_json_file_worker,
-                    chunk_size=100,  # Process 100 files at a time
-                    description="💓 Processing HR files",
-                )
-
-                # Parse all collected data
-                for item in all_file_data:
-                    hr_data = self._parse_single_heart_rate(item)
-                    if hr_data:
-                        heart_rate_data.append(hr_data)
-            else:
-                # Sequential processing for small number of files
-                for json_file in tqdm(
-                    hr_files, desc="    💓 Processing HR files", leave=False
-                ):
-                    try:
-                        file_data = self._parse_json_file_efficiently(json_file)
-
-                        if isinstance(file_data, list):
-                            for item in file_data:
+                processed_files = 0
+                
+                with tqdm(
+                    total=len(hr_files), 
+                    desc="    💓 Processing HR files",
+                    unit="files",
+                    unit_scale=True
+                ) as pbar:
+                    for i in range(0, len(hr_files), chunk_size):
+                        chunk = hr_files[i : i + chunk_size]
+                        
+                        # Process chunk with improved progress tracking
+                        chunk_start_time = time.time()
+                        chunk_results = self.parallel_processor.process_files_parallel_with_progress(
+                            chunk, process_json_file_worker, pbar, processed_files
+                        )
+                        
+                        chunk_duration = time.time() - chunk_start_time
+                        processed_files += len(chunk)
+                        
+                        # Process the results from parallel processing
+                        records_added = 0
+                        for item in chunk_results:
+                            # Only process if item is a dictionary
+                            if isinstance(item, dict):
                                 hr_data = self._parse_single_heart_rate(item)
                                 if hr_data:
                                     heart_rate_data.append(hr_data)
+                                    records_added += 1
 
-                    except (json.JSONDecodeError, Exception) as e:
-                        logger.warning(
-                            f"Error parsing heart rate file {json_file}: {e}"
-                        )
+                        # Clean up memory after each chunk
+                        del chunk_results
+                        gc.collect()
+                        
+                        # Calculate processing stats
+                        elapsed_time = time.time() - start_time
+                        files_per_second = processed_files / elapsed_time if elapsed_time > 0 else 0
+                        remaining_files = len(hr_files) - processed_files
+                        eta_seconds = remaining_files / files_per_second if files_per_second > 0 else 0
+                        eta_minutes = int(eta_seconds / 60)
+                        
+                        # Update progress description with stats
+                        pbar.set_postfix({
+                            'records': len(heart_rate_data),
+                            'rate': f'{files_per_second:.1f} files/sec',
+                            'ETA': f'{eta_minutes}m' if eta_minutes > 0 else '<1m',
+                            'chunk_time': f'{chunk_duration:.1f}s'
+                        })
 
-        logger.info(f"Parsed {len(heart_rate_data)} heart rate records")
-        print(f"    ✅ Parsed {len(heart_rate_data)} heart rate records")
+                        # Log progress for large datasets
+                        if i % (chunk_size * 10) == 0:
+                            logger.info(
+                                f"Processed {processed_files}/{len(hr_files)} heart rate files, "
+                                f"found {len(heart_rate_data)} records, "
+                                f"rate: {files_per_second:.1f} files/sec"
+                            )
+            else:
+                # Sequential processing for small number of files
+                
+                with tqdm(
+                    total=len(hr_files),
+                    desc="    💓 Processing HR files",
+                    unit="files",
+                    unit_scale=True,
+                    leave=False
+                ) as pbar:
+                    for i, json_file in enumerate(hr_files):
+                        try:
+                            file_data = self._parse_json_file_efficiently(json_file)
+
+                            if isinstance(file_data, list):
+                                records_added = 0
+                                for item in file_data:
+                                    hr_data = self._parse_single_heart_rate(item)
+                                    if hr_data:
+                                        heart_rate_data.append(hr_data)
+                                        records_added += 1
+                                        
+                                # Update progress with stats
+                                elapsed_time = time.time() - start_time
+                                files_per_second = (i + 1) / elapsed_time if elapsed_time > 0 else 0
+                                remaining_files = len(hr_files) - (i + 1)
+                                eta_seconds = remaining_files / files_per_second if files_per_second > 0 else 0
+                                eta_minutes = int(eta_seconds / 60)
+                                
+                                pbar.set_postfix({
+                                    'records': len(heart_rate_data),
+                                    'rate': f'{files_per_second:.1f} files/sec',
+                                    'ETA': f'{eta_minutes}m' if eta_minutes > 0 else '<1m',
+                                    'current': json_file.name[:20]  # Show current file name (truncated)
+                                })
+
+                        except (json.JSONDecodeError, Exception) as e:
+                            logger.warning(
+                                f"Error parsing heart rate file {json_file}: {e}"
+                            )
+                        finally:
+                            pbar.update(1)
+
+        # Performance summary
+        end_time = time.time()
+        total_processing_time = end_time - start_time
+        avg_files_per_second = len(hr_files) / total_processing_time if total_processing_time > 0 else 0
+        
+        logger.info(f"Parsed {len(heart_rate_data)} heart rate records from {len(hr_files)} files in {total_processing_time:.1f}s")
+        print(f"    ✅ Parsed {len(heart_rate_data)} heart rate records from {len(hr_files)} files")
+        print(f"    📈 Processing rate: {avg_files_per_second:.1f} files/sec, {total_processing_time:.1f}s total")
+        
         return heart_rate_data
 
     def _parse_single_heart_rate(self, data: Dict[str, Any]) -> Optional[HeartRateData]:

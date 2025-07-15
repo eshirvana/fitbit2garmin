@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
 from multiprocessing import Pool, cpu_count
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import concurrent.futures
 import pickle
 import hashlib
 from datetime import datetime
@@ -25,71 +26,29 @@ class ParallelProcessor:
         )  # Limit to 8 to avoid overwhelming
         logger.info(f"Initialized parallel processor with {self.max_workers} workers")
 
-    def process_in_chunks(
-        self,
-        items: List[Any],
-        process_func: Callable,
-        chunk_size: int = 100,
-        description: str = "Processing items",
-    ) -> List[Any]:
-        """Process items in parallel in chunks to manage memory."""
-        if not items:
-            return []
-
-        all_results = []
-        num_chunks = (len(items) + chunk_size - 1) // chunk_size
-
-        from tqdm import tqdm
-
-        for i in tqdm(range(num_chunks), desc=f"Processing in chunks", leave=False):
-            chunk = items[i * chunk_size : (i + 1) * chunk_size]
-            chunk_description = f"{description} (chunk {i+1}/{num_chunks})"
-
-            # Use the existing parallel processing logic for the chunk
-            chunk_results = self.process_files_parallel(
-                chunk, process_func, chunk_description
-            )
-            all_results.extend(chunk_results)
-
-        return all_results
-
     def process_files_parallel(
         self,
         files: List[Path],
         process_func: Callable,
         description: str = "Processing files",
     ) -> List[Any]:
-        """Process files in parallel with progress tracking."""
+        """Process files in parallel with progress tracking and memory management."""
         if not files:
             return []
 
         results = []
-
-        # For small number of files, use sequential processing
-        if len(files) <= 2:
-            from tqdm import tqdm
-
-            for file_path in tqdm(files, desc=description, leave=False):
-                try:
-                    result = process_func(file_path)
-                    if result:
-                        results.extend(result if isinstance(result, list) else [result])
-                except Exception as e:
-                    logger.warning(f"Error processing {file_path}: {e}")
-            return results
-
-        # Use parallel processing for larger file sets
         try:
-            from tqdm import tqdm
-
             with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+                from tqdm import tqdm
+                import gc
+
                 # Submit all tasks
                 future_to_file = {
                     executor.submit(process_func, file_path): file_path
                     for file_path in files
                 }
 
-                # Process completed tasks with progress bar
+                # Process results as they complete
                 for future in tqdm(
                     as_completed(future_to_file),
                     total=len(files),
@@ -98,29 +57,137 @@ class ParallelProcessor:
                 ):
                     file_path = future_to_file[future]
                     try:
-                        result = future.result()
+                        result = future.result(timeout=30)  # 30 second timeout per file
                         if result:
-                            # The worker function now returns a list of parsed items
                             results.extend(result)
                     except Exception as e:
                         logger.warning(f"Error processing {file_path}: {e}")
+                    finally:
+                        # Clean up the future to free memory
+                        future_to_file.pop(future, None)
+                        # Force garbage collection periodically
+                        if len(results) % 500 == 0:
+                            gc.collect()
 
         except Exception as e:
-            logger.warning(
-                f"Parallel processing failed, falling back to sequential: {e}"
-            )
+            logger.error(f"Parallel processing failed: {e}")
             # Fallback to sequential processing
-            from tqdm import tqdm
-
-            for file_path in tqdm(
-                files, desc=f"{description} (sequential)", leave=False
-            ):
+            results = []
+            for file_path in files:
                 try:
                     result = process_func(file_path)
                     if result:
-                        results.extend(result if isinstance(result, list) else [result])
+                        results.extend(result)
                 except Exception as e:
                     logger.warning(f"Error processing {file_path}: {e}")
+
+        return results
+
+    def process_files_parallel_with_progress(
+        self,
+        files: List[Path],
+        process_func: Callable,
+        progress_bar,
+        files_processed_so_far: int = 0,
+    ) -> List[Any]:
+        """Process files in parallel with external progress bar updates and health monitoring."""
+        if not files:
+            return []
+
+        results = []
+        failed_files = []
+        
+        try:
+            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+                import gc
+                import time
+                import psutil
+                import signal
+
+                # Submit all tasks
+                future_to_file = {
+                    executor.submit(process_func, file_path): file_path
+                    for file_path in files
+                }
+
+                # Process results as they complete with individual progress updates
+                completed_count = 0
+                last_progress_time = time.time()
+                
+                for future in as_completed(future_to_file):
+                    current_time = time.time()
+                    file_path = future_to_file[future]
+                    
+                    try:
+                        # Check if process is taking too long
+                        if current_time - last_progress_time > 300:  # 5 minutes without progress
+                            logger.warning("Processing appears stuck, attempting to continue...")
+                            
+                        result = future.result(timeout=120)  # Increased timeout to 120 seconds
+                        if result:
+                            results.extend(result)
+                        
+                        # Update progress bar immediately after each file
+                        completed_count += 1
+                        progress_bar.update(1)
+                        last_progress_time = current_time
+                        
+                        # Update progress description with current file
+                        progress_bar.set_description(f"    💓 Processing HR files [{completed_count}/{len(files)}]")
+                        
+                    except concurrent.futures.TimeoutError:
+                        logger.warning(f"Timeout processing {file_path}, skipping...")
+                        failed_files.append(file_path)
+                        completed_count += 1
+                        progress_bar.update(1)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error processing {file_path}: {e}")
+                        failed_files.append(file_path)
+                        completed_count += 1
+                        progress_bar.update(1)
+                        
+                    finally:
+                        # Clean up the future to free memory
+                        future_to_file.pop(future, None)
+                        # Force garbage collection periodically
+                        if completed_count % 10 == 0:
+                            gc.collect()
+                            
+                        # Check memory usage periodically
+                        if completed_count % 50 == 0:
+                            try:
+                                process = psutil.Process()
+                                memory_mb = process.memory_info().rss / 1024 / 1024
+                                if memory_mb > 2048:  # 2GB memory warning
+                                    logger.warning(f"High memory usage: {memory_mb:.1f}MB")
+                            except:
+                                pass
+
+        except Exception as e:
+            logger.error(f"Parallel processing failed: {e}")
+            # Fallback to sequential processing with progress updates
+            logger.info("Falling back to sequential processing...")
+            progress_bar.set_description("    💓 Processing HR files (fallback)")
+            
+            results = []
+            for i, file_path in enumerate(files):
+                try:
+                    result = process_func(file_path)
+                    if result:
+                        results.extend(result)
+                except Exception as e:
+                    logger.warning(f"Error processing {file_path}: {e}")
+                    failed_files.append(file_path)
+                finally:
+                    progress_bar.update(1)
+                    progress_bar.set_description(f"    💓 Processing HR files (fallback) [{i+1}/{len(files)}]")
+
+        # Report on failed files
+        if failed_files:
+            logger.warning(f"Failed to process {len(failed_files)} files: {[f.name for f in failed_files[:5]]}")
+            if len(failed_files) > 5:
+                logger.warning(f"... and {len(failed_files) - 5} more failed files")
 
         return results
 
@@ -231,28 +298,70 @@ class ResumeManager:
 
 
 def process_json_file_worker(file_path: Path) -> List[Dict[str, Any]]:
-    """Worker function for processing JSON files in parallel."""
+    """Worker function for processing JSON files in parallel with memory efficiency."""
     try:
+        import orjson
+        import gc
         import ijson
 
+        # Check file size and use appropriate parsing strategy
         file_size = file_path.stat().st_size
+        
+        # Increased limit to 50MB for heart rate files
+        if file_size > 50 * 1024 * 1024:  # 50MB limit
+            logger.warning(f"Skipping very large file {file_path} ({file_size / (1024*1024):.1f}MB)")
+            return []
 
         # Use streaming parser for files larger than 10MB
-        if file_size > 10 * 1024 * 1024:  # 10MB
+        if file_size > 10 * 1024 * 1024:
+            logger.debug(f"Using streaming parser for large file {file_path} ({file_size / (1024*1024):.1f}MB)")
             try:
                 with open(file_path, "rb") as f:
-                    items = []
-                    parser = ijson.items(f, "item")
-                    for item in parser:
-                        items.append(item)
-                    return items
-            except (ijson.JSONError, ValueError):
-                pass
+                    result = []
+                    # Try to parse as array of items
+                    try:
+                        parser = ijson.items(f, "item")
+                        for item in parser:
+                            if isinstance(item, dict):
+                                result.append(item)
+                            # Limit memory usage
+                            if len(result) > 10000:  # Process in chunks
+                                break
+                    except ijson.JSONError:
+                        # If ijson fails, fall back to reading entire file
+                        f.seek(0)
+                        data = orjson.loads(f.read())
+                        if isinstance(data, list):
+                            result = [item for item in data if isinstance(item, dict)]
+                        elif isinstance(data, dict):
+                            result = [data]
+                    
+                    if len(result) > 1000:
+                        gc.collect()
+                    return result
+                    
+            except Exception as e:
+                logger.warning(f"Streaming parser failed for {file_path}: {e}, trying standard parser")
+                # Fall through to standard parsing
 
-        # Regular JSON parsing for smaller files or when streaming fails
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else [data]
+        # Standard parsing for smaller files
+        with open(file_path, "rb") as f:
+            data = orjson.loads(f.read())
+
+            # Ensure we return a list of dictionaries
+            if isinstance(data, list):
+                # Filter out non-dictionary items
+                result = [item for item in data if isinstance(item, dict)]
+            elif isinstance(data, dict):
+                result = [data]
+            else:
+                result = []
+
+            # Force garbage collection for large results
+            if len(result) > 1000:
+                gc.collect()
+
+            return result
 
     except Exception as e:
         logger.warning(f"Error processing {file_path}: {e}")

@@ -63,7 +63,9 @@ def cli(verbose):
     help="Enable/disable resume capability for interrupted conversions",
 )
 @click.option(
-    "--parallel/--no-parallel", default=True, help="Enable/disable parallel processing"
+    "--parallel/--no-parallel",
+    default=True,
+    help="Enable/disable parallel processing (disable if experiencing memory issues)",
 )
 @click.option(
     "--max-workers",
