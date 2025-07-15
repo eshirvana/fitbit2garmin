@@ -4,8 +4,10 @@ fitbit2garmin/__init__.py
 fitbit2garmin/cli.py
 fitbit2garmin/converter.py
 fitbit2garmin/exporter.py
+fitbit2garmin/heart_rate_zones.py
 fitbit2garmin/models.py
 fitbit2garmin/parser.py
+fitbit2garmin/utils.py
 fitbit2garmin.egg-info/PKG-INFO
 fitbit2garmin.egg-info/SOURCES.txt
 fitbit2garmin.egg-info/dependency_links.txt

@@ -8,10 +8,10 @@ version = "1.0.0"
 description = "Convert Fitbit Google Takeout data to Garmin Connect compatible formats"
 readme = "README.md"
 requires-python = ">=3.9"
+license = {text = "MIT"}
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -38,3 +38,8 @@ fitbit2garmin = "fitbit2garmin.cli:main"
 Homepage = "https://github.com/user/fitbit2garmin"
 Repository = "https://github.com/user/fitbit2garmin"
 Issues = "https://github.com/user/fitbit2garmin/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fitbit2garmin*"]
+exclude = ["output*", "tests*"]
