@@ -25,6 +25,34 @@ class ParallelProcessor:
         )  # Limit to 8 to avoid overwhelming
         logger.info(f"Initialized parallel processor with {self.max_workers} workers")
 
+    def process_in_chunks(
+        self,
+        items: List[Any],
+        process_func: Callable,
+        chunk_size: int = 100,
+        description: str = "Processing items",
+    ) -> List[Any]:
+        """Process items in parallel in chunks to manage memory."""
+        if not items:
+            return []
+
+        all_results = []
+        num_chunks = (len(items) + chunk_size - 1) // chunk_size
+
+        from tqdm import tqdm
+
+        for i in tqdm(range(num_chunks), desc=f"Processing in chunks", leave=False):
+            chunk = items[i * chunk_size : (i + 1) * chunk_size]
+            chunk_description = f"{description} (chunk {i+1}/{num_chunks})"
+
+            # Use the existing parallel processing logic for the chunk
+            chunk_results = self.process_files_parallel(
+                chunk, process_func, chunk_description
+            )
+            all_results.extend(chunk_results)
+
+        return all_results
+
     def process_files_parallel(
         self,
         files: List[Path],
@@ -72,9 +100,8 @@ class ParallelProcessor:
                     try:
                         result = future.result()
                         if result:
-                            results.extend(
-                                result if isinstance(result, list) else [result]
-                            )
+                            # The worker function now returns a list of parsed items
+                            results.extend(result)
                     except Exception as e:
                         logger.warning(f"Error processing {file_path}: {e}")
 

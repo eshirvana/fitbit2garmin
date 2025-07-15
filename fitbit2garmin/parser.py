@@ -299,24 +299,25 @@ class FitbitParser:
         # Optional: Limit processing for performance
         # activity_files = activity_files[:10]  # Uncomment to process only first 10 files
 
-        for json_file in tqdm(
-            activity_files, desc="    🏃 Processing activity files", leave=False
-        ):
-            try:
-                data = self._parse_json_file_efficiently(json_file)
+        with tqdm(total=len(activity_files), desc="    🏃 Processing activity files", leave=False) as pbar:
+            for json_file in activity_files:
+                pbar.set_description(f"    🏃 Processing {json_file.name}")
+                try:
+                    data = self._parse_json_file_efficiently(json_file)
 
-                if isinstance(data, list):
-                    for item in data:
-                        activity = self._parse_single_activity(item)
+                    if isinstance(data, list):
+                        for item in data:
+                            activity = self._parse_single_activity(item)
+                            if activity:
+                                activities.append(activity)
+                    elif isinstance(data, dict):
+                        activity = self._parse_single_activity(data)
                         if activity:
                             activities.append(activity)
-                elif isinstance(data, dict):
-                    activity = self._parse_single_activity(data)
-                    if activity:
-                        activities.append(activity)
 
-            except (json.JSONDecodeError, Exception) as e:
-                logger.warning(f"Error parsing activity file {json_file}: {e}")
+                except (json.JSONDecodeError, Exception) as e:
+                    logger.warning(f"Error parsing activity file {json_file}: {e}")
+                pbar.update(1)
 
         return activities
 
@@ -376,7 +377,8 @@ class FitbitParser:
             active_duration = data.get("activeDuration")
             has_gps = gps_data is not None and len(gps_data) > 0 if gps_data else False
             manual_values_specified = data.get("manualValuesSpecified")
-            source = data.get("source")
+            source_data = data.get("source")
+            source = json.dumps(source_data) if isinstance(source_data, dict) else source_data
             is_favorite = data.get("isFavorite")
             activity_parent_id = data.get("activityParentId")
             activity_parent_name = data.get("activityParentName")
@@ -637,19 +639,21 @@ class FitbitParser:
                 )
 
                 # Process JSON files
-                for json_file in sleep_files:
-                    try:
-                        print(f"    📄 Processing: {json_file.name}")
-                        with open(json_file, "r", encoding="utf-8") as f:
-                            data = json.load(f)
+                with tqdm(total=len(sleep_files), desc="    😴 Processing sleep files", leave=False) as pbar:
+                    for json_file in sleep_files:
+                        pbar.set_description(f"    😴 Processing {json_file.name}")
+                        try:
+                            with open(json_file, "r", encoding="utf-8") as f:
+                                data = json.load(f)
 
-                        if isinstance(data, list):
-                            for item in data:
-                                sleep = self._parse_single_sleep_record(item)
-                                if sleep:
-                                    sleep_data.append(sleep)
-                    except (json.JSONDecodeError, Exception) as e:
-                        logger.warning(f"Error parsing sleep file {json_file}: {e}")
+                            if isinstance(data, list):
+                                for item in data:
+                                    sleep = self._parse_single_sleep_record(item)
+                                    if sleep:
+                                        sleep_data.append(sleep)
+                        except (json.JSONDecodeError, Exception) as e:
+                            logger.warning(f"Error parsing sleep file {json_file}: {e}")
+                        pbar.update(1)
 
                 # Process CSV files (Sleep Score data)
                 for csv_file in sleep_csv_files:
@@ -860,24 +864,26 @@ class FitbitParser:
 
         print(f"    📋 Found {len(daily_files)} daily metrics files")
 
-        for json_file in daily_files:
-            try:
-                print(f"    📄 Processing: {json_file.name}")
-                with open(json_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+        with tqdm(total=len(daily_files), desc="    📄 Processing daily metrics files", leave=False) as pbar:
+            for json_file in daily_files:
+                pbar.set_description(f"    📄 Processing {json_file.name}")
+                try:
+                    with open(json_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
 
-                if isinstance(data, list):
-                    for item in data:
-                        metric = self._parse_single_daily_metric(item)
+                    if isinstance(data, list):
+                        for item in data:
+                            metric = self._parse_single_daily_metric(item)
+                            if metric:
+                                metrics.append(metric)
+                    elif isinstance(data, dict):
+                        metric = self._parse_single_daily_metric(data)
                         if metric:
                             metrics.append(metric)
-                elif isinstance(data, dict):
-                    metric = self._parse_single_daily_metric(data)
-                    if metric:
-                        metrics.append(metric)
 
-            except (json.JSONDecodeError, Exception) as e:
-                logger.warning(f"Error parsing daily metrics file {json_file}: {e}")
+                except (json.JSONDecodeError, Exception) as e:
+                    logger.warning(f"Error parsing daily metrics file {json_file}: {e}")
+                pbar.update(1)
 
         return metrics
 
@@ -928,21 +934,20 @@ class FitbitParser:
             if self.enable_parallel and len(hr_files) > 2:
                 # Use parallel processing for large number of files
                 print("    🚀 Using parallel processing for heart rate data")
-                all_file_data = self.parallel_processor.process_files_parallel(
-                    hr_files, process_json_file_worker, "💓 Processing HR files"
+
+                # Process files in chunks to manage memory
+                all_file_data = self.parallel_processor.process_in_chunks(
+                    hr_files,
+                    process_json_file_worker,
+                    chunk_size=100,  # Process 100 files at a time
+                    description="💓 Processing HR files",
                 )
 
                 # Parse all collected data
-                for file_data in all_file_data:
-                    if isinstance(file_data, list):
-                        for item in file_data:
-                            hr_data = self._parse_single_heart_rate(item)
-                            if hr_data:
-                                heart_rate_data.append(hr_data)
-                    else:
-                        hr_data = self._parse_single_heart_rate(file_data)
-                        if hr_data:
-                            heart_rate_data.append(hr_data)
+                for item in all_file_data:
+                    hr_data = self._parse_single_heart_rate(item)
+                    if hr_data:
+                        heart_rate_data.append(hr_data)
             else:
                 # Sequential processing for small number of files
                 for json_file in tqdm(
