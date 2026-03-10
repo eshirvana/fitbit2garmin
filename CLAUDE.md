@@ -4,100 +4,66 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Python-based tool for converting Fitbit Google Takeout data to Garmin Connect compatible formats. The tool maximizes data preservation across all available metrics including activities, sleep, heart rate, body composition, and daily metrics.
+Python CLI tool (v1.1.0) that converts Fitbit Google Takeout data to Garmin Connect compatible formats. Entry point: `fitbit2garmin.cli:main`.
 
 ## Development Commands
 
-### Setup and Installation
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Development installation
+# Development installation (editable)
 pip install -e .
-```
 
-### Running the Tool
-```bash
-# Basic usage
+# Run the tool
 fitbit2garmin convert path/to/Takeout
-
-# With options
-fitbit2garmin convert path/to/Takeout --output-dir ./output --format csv --format tcx
-
-# Analyze data
+fitbit2garmin convert path/to/Takeout --output-dir ./output --format csv --format tcx --format gpx --format fit
 fitbit2garmin analyze path/to/Takeout
-
-# Get help
-fitbit2garmin --help
-```
-
-### Testing and Quality
-```bash
-# Run tests (when implemented)
-python -m pytest tests/
+fitbit2garmin debug-activities path/to/Takeout  # Debug activity type mapping
 
 # Code formatting
 black fitbit2garmin/
 flake8 fitbit2garmin/
 ```
 
+No tests currently exist in the repo.
+
 ## Architecture
 
-### Core Components
-- **models.py**: Pydantic data models for all Fitbit data types
-- **parser.py**: JSON parser for Google Takeout data structure
-- **converter.py**: Converts data to TCX/GPX formats for activities
-- **exporter.py**: Exports data to CSV formats compatible with Garmin Connect
-- **cli.py**: Command-line interface with Click framework
+### Module Responsibilities
+
+- **models.py**: Pydantic v2 data models — `ActivityType` enum (27 types), `SleepStage` enum, and dataclasses for all metric types. `FitbitUserData` is the master container passed between pipeline stages.
+- **parser.py** (`FitbitParser`): Largest file (1500+ lines). Discovers and parses all Google Takeout JSON files. Handles the 14+ possible Fitbit directory names, maps 50+ Fitbit activity type IDs to `ActivityType` enum, and enhances HR zones via `heart_rate_zones.py`.
+- **converter.py** (`DataConverter`): Generates TCX, GPX, and FIT files per activity. TCX includes Garmin HR zone extensions. FIT uses `fit-tool`. Activity types are mapped to Garmin-recognized sport categories.
+- **exporter.py** (`GarminExporter`): Pandas-based CSV export — produces separate files per metric type (steps, distance, calories, sleep, body composition, HR zones, etc.).
+- **heart_rate_zones.py** (`HeartRateZoneCalculator`): Supports 4 max-HR estimation formulas (Tanaka, Fox, Gellish, Nes), Karvonen/percentage zone methods, and 3→5 zone mapping from Fitbit to Garmin zones.
+- **utils.py**: `ParallelProcessor` (ProcessPoolExecutor with memory monitoring and fallback to sequential) and `ResumeManager` (MD5-hash-based state persistence in `.fitbit2garmin_cache/`).
+- **cli.py**: Click commands — `convert`, `analyze`, `debug-activities`, `info`.
 
 ### Data Flow
-1. Parse Fitbit JSON files from Google Takeout
-2. Convert to structured data models
-3. Export to multiple formats (CSV, TCX, GPX)
-4. Generate Garmin Connect import-ready files
 
-### Key Features
-- Supports 15+ Fitbit data types
-- Handles years of historical data
-- Multiple export formats (CSV, TCX, GPX, FIT planned)
-- Comprehensive data validation
-- Progress tracking and error handling
+```
+Google Takeout directory
+    → FitbitParser.parse_all_data()       # discovers dirs, streams JSON, maps types
+    → FitbitUserData (models.py)          # validated Pydantic container
+    → DataConverter.batch_convert_activities()  # → .tcx / .gpx / .fit files
+    → GarminExporter.export_all_data()         # → CSV files per metric
+```
 
-## Dependencies
+### Performance Features
 
-### Core Libraries
-- `gpxpy`: GPX file generation
-- `fit-tool`: FIT file creation (planned)
-- `tcxreader`: TCX file handling
-- `pandas`: Data manipulation
-- `pydantic`: Data validation
-- `click`: CLI framework
-- `tqdm`: Progress bars
+- **Streaming JSON** (ijson): activated for files >10 MB; falls back to orjson then stdlib `json`
+- **Parallel processing**: ProcessPoolExecutor, max 8 workers, 30–120s timeouts per file, falls back to sequential on failure
+- **Memory limits**: 1 GB warning, enforced via psutil; GC triggered every 1000 items
+- **Resume**: file hashes stored in `.fitbit2garmin_cache/` allow skipping already-processed files (`--resume` flag)
 
-### Data Types Supported
-- Activities (GPS tracks, exercise sessions)
-- Daily metrics (steps, calories, distance, floors)
-- Sleep data (duration, stages, efficiency)
-- Heart rate data (continuous monitoring)
-- Body composition (weight, BMI, body fat)
-- Heart rate variability (limited)
-- Stress data (limited)
+### Adding a New Data Type
 
-## Common Tasks
+1. Add model to `models.py` and field to `FitbitUserData`
+2. Add `_parse_<type>()` method in `parser.py`; call it from `parse_all_data()`
+3. Add `_export_<type>_csv()` in `exporter.py`; call from `export_all_data()`
+4. Update CLI help text and output summary in `cli.py`
 
-### Adding New Data Type Support
-1. Add data model to `models.py`
-2. Add parser method to `parser.py`
-3. Add export method to `exporter.py`
-4. Update CLI help text
+### Activity Type Mapping
 
-### Fixing Data Parsing Issues
-- Check JSON structure in Google Takeout data
-- Verify date/time parsing with different formats
-- Handle missing or null values gracefully
-
-### Improving Export Formats
-- Check Garmin Connect import specifications
-- Validate generated files with external tools
-- Test with real Garmin Connect uploads
+Fitbit uses numeric IDs (e.g., `90009` → `RUN`, `20049` → `TREADMILL`) plus string name fallbacks. The mapping table lives in `parser.py:_map_activity_type()`. Converter maps these to TCX sport strings and FIT sport values in `converter.py`.

@@ -1305,19 +1305,220 @@ class FitbitParser:
             return None
 
     def _parse_stress_data(self) -> List[StressData]:
-        """Parse stress data."""
-        # Placeholder for stress data parsing
-        return []
+        """Parse stress management score data from CSV files."""
+        stress_data = []
+
+        if "stress" not in self.data_directories:
+            return stress_data
+
+        stress_path = self.data_directories["stress"]
+        print(f"  📁 Processing stress data from: {stress_path.name}")
+
+        csv_files = list(stress_path.glob("**/*.csv"))
+        print(f"    📋 Found {len(csv_files)} stress files")
+
+        for csv_file in tqdm(csv_files, desc="    🧘 Processing stress files", leave=False):
+            try:
+                df = pd.read_csv(csv_file)
+                for _, row in df.iterrows():
+                    # Fitbit stress CSV columns: DATE, STRESS_SCORE (column names vary)
+                    date_str = str(row.get("DATE", row.get("date", row.get("timestamp", ""))))
+                    if not date_str or date_str == "nan":
+                        continue
+                    try:
+                        record_date = parse_datetime(date_str).date()
+                    except Exception:
+                        continue
+
+                    stress_score = None
+                    for col_name in ["STRESS_SCORE", "stress_score", "Stress Score", "score"]:
+                        val = row.get(col_name)
+                        if val is not None and pd.notna(val):
+                            try:
+                                stress_score = int(float(val))
+                            except (ValueError, TypeError):
+                                pass
+                            break
+
+                    stress_data.append(StressData(
+                        date=record_date,
+                        stress_score=stress_score,
+                    ))
+            except Exception as e:
+                logger.warning(f"Error parsing stress file {csv_file}: {e}")
+
+        logger.info(f"Parsed {len(stress_data)} stress records")
+        print(f"    ✅ Parsed {len(stress_data)} stress records")
+        return stress_data
 
     def _parse_temperature_data(self) -> List[TemperatureData]:
-        """Parse temperature data."""
-        # Placeholder for temperature data parsing
-        return []
+        """Parse skin temperature deviation data from Fitbit exports.
+
+        Note: Fitbit records nightly skin temperature as a deviation from the
+        user's personal baseline (not absolute temperature). Positive = warmer,
+        negative = cooler. Requires a Fitbit Sense, Versa 3+, or Charge 5+.
+        """
+        temperature_data = []
+
+        if "temperature" not in self.data_directories:
+            return temperature_data
+
+        temp_path = self.data_directories["temperature"]
+        print(f"  📁 Processing temperature data from: {temp_path.name}")
+
+        csv_files = list(temp_path.glob("**/*.csv"))
+        json_files = list(temp_path.glob("**/*.json"))
+        print(f"    📋 Found {len(csv_files)} CSV and {len(json_files)} JSON temperature files")
+
+        for csv_file in tqdm(csv_files, desc="    🌡️ Processing temperature CSV files", leave=False):
+            try:
+                df = pd.read_csv(csv_file)
+                for _, row in df.iterrows():
+                    date_str = str(row.get("date_time", row.get("dateTime", row.get("date", ""))))
+                    if not date_str or date_str == "nan":
+                        continue
+                    try:
+                        record_date = parse_datetime(date_str).date()
+                    except Exception:
+                        continue
+
+                    temp_deviation = None
+                    for col_name in ["temperature_celsius", "nightlyRelative", "temperature", "Temperature", "value"]:
+                        val = row.get(col_name)
+                        if val is not None and pd.notna(val):
+                            try:
+                                temp_deviation = float(val)
+                            except (ValueError, TypeError):
+                                pass
+                            break
+
+                    temperature_data.append(TemperatureData(
+                        date=record_date,
+                        temperature_celsius=temp_deviation,  # deviation from baseline, not absolute
+                    ))
+            except Exception as e:
+                logger.warning(f"Error parsing temperature CSV file {csv_file}: {e}")
+
+        for json_file in tqdm(json_files, desc="    🌡️ Processing temperature JSON files", leave=False):
+            try:
+                data = self._parse_json_file_efficiently(json_file)
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    date_str = item.get("dateTime", "")
+                    if not date_str:
+                        continue
+                    try:
+                        record_date = parse_datetime(date_str).date()
+                    except Exception:
+                        continue
+
+                    value = item.get("value", {})
+                    if isinstance(value, dict):
+                        temp_deviation = value.get("nightlyRelative")
+                    else:
+                        try:
+                            temp_deviation = float(value) if value is not None else None
+                        except (ValueError, TypeError):
+                            temp_deviation = None
+
+                    if temp_deviation is not None:
+                        temperature_data.append(TemperatureData(
+                            date=record_date,
+                            temperature_celsius=float(temp_deviation),
+                        ))
+            except Exception as e:
+                logger.warning(f"Error parsing temperature JSON file {json_file}: {e}")
+
+        logger.info(f"Parsed {len(temperature_data)} temperature records")
+        print(f"    ✅ Parsed {len(temperature_data)} temperature records")
+        return temperature_data
 
     def _parse_spo2_data(self) -> List[SpO2Data]:
-        """Parse SpO2 data."""
-        # Placeholder for SpO2 data parsing
-        return []
+        """Parse blood oxygen saturation (SpO2) data from Fitbit exports.
+
+        Fitbit records SpO2 during sleep. A reading of 50 is an invalid/error marker.
+        Both daily summaries (avg/min/max) and minute-level files may be present.
+        """
+        spo2_data = []
+
+        if "spo2" not in self.data_directories:
+            return spo2_data
+
+        spo2_path = self.data_directories["spo2"]
+        print(f"  📁 Processing SpO2 data from: {spo2_path.name}")
+
+        csv_files = list(spo2_path.glob("**/*.csv"))
+        json_files = list(spo2_path.glob("**/*.json"))
+        print(f"    📋 Found {len(csv_files)} CSV and {len(json_files)} JSON SpO2 files")
+
+        for csv_file in tqdm(csv_files, desc="    🩸 Processing SpO2 CSV files", leave=False):
+            try:
+                df = pd.read_csv(csv_file)
+                for _, row in df.iterrows():
+                    date_str = str(row.get("timestamp", row.get("dateTime", row.get("date", ""))))
+                    if not date_str or date_str == "nan":
+                        continue
+                    try:
+                        dt = parse_datetime(date_str)
+                        record_date = dt.date()
+                    except Exception:
+                        continue
+
+                    # Find the SpO2 value — column names vary across Fitbit export versions
+                    spo2_value = None
+                    for col in df.columns:
+                        col_lower = col.lower()
+                        if "spo2" in col_lower or "oxygen" in col_lower or "avg" in col_lower:
+                            val = row.get(col)
+                            if val is not None and pd.notna(val):
+                                try:
+                                    candidate = float(val)
+                                    if candidate != 50.0:  # 50.0 is Fitbit's invalid reading marker
+                                        spo2_value = candidate
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
+
+                    if spo2_value is not None:
+                        spo2_data.append(SpO2Data(
+                            date=record_date,
+                            spo2_percentage=spo2_value,
+                            timestamp=dt,
+                        ))
+            except Exception as e:
+                logger.warning(f"Error parsing SpO2 CSV file {csv_file}: {e}")
+
+        for json_file in tqdm(json_files, desc="    🩸 Processing SpO2 JSON files", leave=False):
+            try:
+                data = self._parse_json_file_efficiently(json_file)
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    date_str = item.get("dateTime", "")
+                    if not date_str:
+                        continue
+                    try:
+                        record_date = parse_datetime(date_str).date()
+                    except Exception:
+                        continue
+
+                    value = item.get("value", {})
+                    if isinstance(value, dict):
+                        avg_val = value.get("avg")
+                        if avg_val is not None:
+                            spo2_data.append(SpO2Data(
+                                date=record_date,
+                                spo2_percentage=float(avg_val),
+                            ))
+            except Exception as e:
+                logger.warning(f"Error parsing SpO2 JSON file {json_file}: {e}")
+
+        logger.info(f"Parsed {len(spo2_data)} SpO2 records")
+        print(f"    ✅ Parsed {len(spo2_data)} SpO2 records")
+        return spo2_data
 
     def _parse_active_zone_minutes(self) -> List[ActiveZoneMinutes]:
         """Parse active zone minutes data from CSV files."""
@@ -1428,20 +1629,20 @@ class FitbitParser:
                 elif "elevation" in point:
                     enhanced_point["altitude"] = float(point["elevation"])
 
-                # Timestamp
+                # Timestamp — TCX/GPX requires ISO 8601 UTC format with trailing 'Z'
                 if "time" in point:
                     try:
                         enhanced_point["time"] = parse_datetime(
                             point["time"]
-                        ).isoformat()
-                    except:
+                        ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                    except Exception:
                         enhanced_point["time"] = point["time"]
                 elif "timestamp" in point:
                     try:
                         enhanced_point["time"] = parse_datetime(
                             point["timestamp"]
-                        ).isoformat()
-                    except:
+                        ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                    except Exception:
                         enhanced_point["time"] = point["timestamp"]
 
                 # Speed

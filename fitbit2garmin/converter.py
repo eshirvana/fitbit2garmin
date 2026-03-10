@@ -14,6 +14,11 @@ from xml.dom import minidom
 
 from .models import ActivityData, FitbitUserData, HeartRateData
 
+# FIT protocol uses December 31, 1989 00:00:00 UTC as its epoch zero.
+# All FIT timestamps must be relative to this epoch, not Unix epoch (1970-01-01).
+# Offset in seconds between Unix epoch and FIT epoch.
+FIT_EPOCH_OFFSET = 631065600
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,29 +82,7 @@ class DataConverter:
                 "Sport", self._map_activity_type_to_tcx(activity.activity_type)
             )
 
-            # Add detailed activity information in notes for better Garmin Connect recognition
-            notes_elem = SubElement(activity_elem, "Notes")
-            notes_parts = [
-                f"Fitbit Activity: {activity.activity_name}",
-                f"Activity Type: {activity.activity_type.value}",
-                f"Log ID: {activity.log_id}",
-            ]
-
-            # Add original Fitbit activity type ID if available
-            if hasattr(activity, "activity_type_id") and activity.activity_type_id:
-                notes_parts.append(f"Fitbit Type ID: {activity.activity_type_id}")
-
-            # Add original activity name if different from processed name
-            if (
-                hasattr(activity, "original_activity_name")
-                and activity.original_activity_name
-                and activity.original_activity_name != activity.activity_name
-            ):
-                notes_parts.append(f"Original: {activity.original_activity_name}")
-
-            notes_elem.text = " | ".join(notes_parts)
-
-            # Activity ID
+            # TCX schema order: Id → Lap(s) → Notes → Creator
             id_elem = SubElement(activity_elem, "Id")
             id_elem.text = activity.start_time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -132,36 +115,29 @@ class DataConverter:
                 max_hr_value = SubElement(max_hr_elem, "Value")
                 max_hr_value.text = str(activity.max_heart_rate)
 
-            # Add maximum speed if available
-            if activity.speed:
-                max_speed_elem = SubElement(lap_elem, "MaximumSpeed")
-                max_speed_elem.text = str(activity.speed)
-
             # Intensity
             intensity_elem = SubElement(lap_elem, "Intensity")
             intensity_elem.text = "Active"
 
-            # Add heart rate zones if available (use recalculated zones if available)
-            zones_to_use = (
-                activity.recalculated_hr_zones
-                if activity.recalculated_hr_zones
-                else activity.heart_rate_zones
-            )
-            if zones_to_use:
+            # Lap Extensions — valid fields per ActivityExtensionv2.xsd:
+            # AvgSpeed (m/s), MaxBikeCadence, AvgRunCadence, MaxRunCadence, Steps, AvgWatts, MaxWatts
+            # HeartRateZone is NOT a valid LX child element and must not be used here.
+            lx_fields = {}
+            if activity.speed:
+                # Fitbit exports speed in km/h; TCX AvgSpeed must be in m/s
+                lx_fields["AvgSpeed"] = round(activity.speed / 3.6, 4)
+            if activity.steps and activity.activity_type.value in ("running", "walking", "treadmill", "hiking"):
+                lx_fields["Steps"] = activity.steps
+
+            if lx_fields:
                 extensions_elem = SubElement(lap_elem, "Extensions")
                 lx_elem = SubElement(extensions_elem, "LX")
                 lx_elem.set(
                     "xmlns", "http://www.garmin.com/xmlschemas/ActivityExtension/v2"
                 )
-
-                for zone in zones_to_use:
-                    if zone.minutes > 0:  # Only include zones with time spent
-                        zone_elem = SubElement(lx_elem, "HeartRateZone")
-                        zone_elem.set("Index", str(zone.zone_index or 0))
-                        zone_elem.set("Name", zone.garmin_zone_name or zone.name)
-                        zone_elem.set("Low", str(zone.min_bpm))
-                        zone_elem.set("High", str(zone.max_bpm))
-                        zone_elem.set("Minutes", str(zone.minutes))
+                for field_name, field_value in lx_fields.items():
+                    field_elem = SubElement(lx_elem, field_name)
+                    field_elem.text = str(field_value)
 
             # Track (for GPS data or time-based data)
             track_elem = SubElement(lap_elem, "Track")
@@ -173,7 +149,23 @@ class DataConverter:
                 # Create basic trackpoints for time-based data
                 self._add_time_trackpoints(track_elem, activity)
 
-            # Add Creator information for better Garmin Connect compatibility
+            # Notes element must come after all Lap elements per TCX schema
+            notes_parts = [
+                f"Fitbit Activity: {activity.activity_name}",
+                f"Activity Type: {activity.activity_type.value}",
+                f"Log ID: {activity.log_id}",
+            ]
+            if activity.activity_type_id:
+                notes_parts.append(f"Fitbit Type ID: {activity.activity_type_id}")
+            if (
+                activity.original_activity_name
+                and activity.original_activity_name != activity.activity_name
+            ):
+                notes_parts.append(f"Original: {activity.original_activity_name}")
+            notes_elem = SubElement(activity_elem, "Notes")
+            notes_elem.text = " | ".join(notes_parts)
+
+            # Creator element (last per TCX schema)
             creator_elem = SubElement(activity_elem, "Creator")
             creator_elem.set("xsi:type", "Device_t")
 
@@ -335,18 +327,11 @@ class DataConverter:
             point_time = activity.start_time + timedelta(milliseconds=i * interval_ms)
             time_elem.text = point_time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-            # Add heart rate if available
+            # Add the recorded average heart rate (do not fabricate variation)
             if activity.average_heart_rate:
                 hr_elem = SubElement(trackpoint, "HeartRateBpm")
                 hr_value = SubElement(hr_elem, "Value")
-                # Vary heart rate slightly around average
-                hr_variation = int(activity.average_heart_rate * 0.1)  # 10% variation
-                import random
-
-                hr_value.text = str(
-                    activity.average_heart_rate
-                    + random.randint(-hr_variation, hr_variation)
-                )
+                hr_value.text = str(activity.average_heart_rate)
 
     def _map_activity_type_to_tcx(self, activity_type) -> str:
         """Map our activity type to TCX sport type with comprehensive Garmin Connect compatibility."""
@@ -440,11 +425,15 @@ class DataConverter:
             builder = FitFileBuilder()
 
             # File ID message
+            # FIT protocol epoch is Dec 31 1989; convert Unix timestamp accordingly.
+            start_fit_ts = int(activity.start_time.timestamp()) - FIT_EPOCH_OFFSET
+            end_fit_ts = start_fit_ts + (activity.duration_ms // 1000)
+
             file_id = FileIdMessage()
             file_id.type = FileType.ACTIVITY
             file_id.manufacturer = Manufacturer.FITBIT
             file_id.product = 1
-            file_id.time_created = int(activity.start_time.timestamp())
+            file_id.time_created = start_fit_ts
             builder.add_message(file_id)
 
             # Map activity type to FIT sport
@@ -454,10 +443,8 @@ class DataConverter:
             session = SessionMessage()
             session.sport = sport
             session.sub_sport = sub_sport
-            session.start_time = int(activity.start_time.timestamp())
-            session.timestamp = int(activity.start_time.timestamp()) + (
-                activity.duration_ms // 1000
-            )
+            session.start_time = start_fit_ts
+            session.timestamp = end_fit_ts
             session.total_elapsed_time = activity.duration_ms / 1000
             session.total_timer_time = (
                 activity.active_duration / 1000
@@ -508,10 +495,8 @@ class DataConverter:
             lap = LapMessage()
             lap.sport = sport
             lap.sub_sport = sub_sport
-            lap.start_time = int(activity.start_time.timestamp())
-            lap.timestamp = int(activity.start_time.timestamp()) + (
-                activity.duration_ms // 1000
-            )
+            lap.start_time = start_fit_ts
+            lap.timestamp = end_fit_ts
             lap.total_elapsed_time = activity.duration_ms / 1000
             lap.total_timer_time = (
                 activity.active_duration / 1000
@@ -559,14 +544,10 @@ class DataConverter:
 
             # Activity message
             activity_msg = ActivityMessage()
-            activity_msg.timestamp = int(activity.start_time.timestamp()) + (
-                activity.duration_ms // 1000
-            )
+            activity_msg.timestamp = end_fit_ts
             activity_msg.type = 0  # Manual
             activity_msg.event = 26  # Activity
-            activity_msg.local_timestamp = int(activity.start_time.timestamp()) + (
-                activity.duration_ms // 1000
-            )
+            activity_msg.local_timestamp = end_fit_ts
             builder.add_message(activity_msg)
 
             # Generate filename
@@ -651,16 +632,15 @@ class DataConverter:
 
                 record = RecordMessage()
 
-                # Timestamp
+                # Timestamp (FIT epoch)
                 point_time = activity.start_time + timedelta(seconds=i * time_interval)
-                record.timestamp = int(point_time.timestamp())
+                record.timestamp = int(point_time.timestamp()) - FIT_EPOCH_OFFSET
 
-                # Position (convert to semicircles)
+                # Position — FIT uses semicircles: degrees * (2^31 / 180)
                 if "latitude" in gps_point and "longitude" in gps_point:
-                    record.position_lat = int(
-                        gps_point["latitude"] * 11930465
-                    )  # Convert to semicircles
-                    record.position_long = int(gps_point["longitude"] * 11930465)
+                    semicircles_factor = 2**31 / 180
+                    record.position_lat = int(gps_point["latitude"] * semicircles_factor)
+                    record.position_long = int(gps_point["longitude"] * semicircles_factor)
 
                 # Altitude
                 if "altitude" in gps_point:
@@ -693,17 +673,9 @@ class DataConverter:
                 if "speed" in gps_point:
                     record.speed = gps_point["speed"]
 
-                # Heart rate
+                # Only use actual recorded heart rate — never fabricate values
                 if "heart_rate" in gps_point:
                     record.heart_rate = gps_point["heart_rate"]
-                elif activity.average_heart_rate:
-                    # Use average heart rate with some variation
-                    import random
-
-                    variation = int(activity.average_heart_rate * 0.1)
-                    record.heart_rate = activity.average_heart_rate + random.randint(
-                        -variation, variation
-                    )
 
                 builder.add_message(record)
 
@@ -726,9 +698,9 @@ class DataConverter:
             for i in range(num_records):
                 record = RecordMessage()
 
-                # Timestamp
+                # Timestamp (FIT epoch)
                 point_time = activity.start_time + timedelta(seconds=i * time_interval)
-                record.timestamp = int(point_time.timestamp())
+                record.timestamp = int(point_time.timestamp()) - FIT_EPOCH_OFFSET
 
                 # Distance (if available, spread over time)
                 if activity.distance:
@@ -736,14 +708,9 @@ class DataConverter:
                         activity.distance * 1000 * i
                     ) / num_records  # Convert km to meters
 
-                # Heart rate
+                # Only use actual recorded average heart rate — do not fabricate variation
                 if activity.average_heart_rate:
-                    import random
-
-                    variation = int(activity.average_heart_rate * 0.1)
-                    record.heart_rate = activity.average_heart_rate + random.randint(
-                        -variation, variation
-                    )
+                    record.heart_rate = activity.average_heart_rate
 
                 # Steps (for walking/running activities)
                 if activity.steps:

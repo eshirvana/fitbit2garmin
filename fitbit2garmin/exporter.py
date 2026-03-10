@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 import pandas as pd
 
+# Fitbit exports weight in pounds (lbs) for US-locale accounts and in kg for metric accounts.
+# Since the JSON does not carry a unit field, we use this threshold as a heuristic:
+# values above LBS_THRESHOLD are assumed to be in lbs and are converted to kg.
+# Users should verify the output if their weight is close to this boundary.
+_LBS_TO_KG = 0.453592
+_LBS_THRESHOLD = 100.0  # kg; weights > 100 kg (220 lbs) are common only for lbs exports
+
 from .models import (
     FitbitUserData,
     ActivityData,
@@ -96,6 +103,24 @@ class GarminExporter:
             print("  💓 Exporting heart rate zones...")
             hr_zones_file = self._export_heart_rate_zones_csv(activities_with_zones)
             exported_files["csv"].append(hr_zones_file)
+
+        # Export stress data
+        if user_data.stress_data:
+            print("  🧘 Exporting stress data...")
+            stress_file = self._export_stress_csv(user_data.stress_data)
+            exported_files["csv"].append(stress_file)
+
+        # Export skin temperature data
+        if user_data.temperature_data:
+            print("  🌡️ Exporting skin temperature data...")
+            temp_file = self._export_temperature_csv(user_data.temperature_data)
+            exported_files["csv"].append(temp_file)
+
+        # Export SpO2 data
+        if user_data.spo2_data:
+            print("  🩸 Exporting SpO2 data...")
+            spo2_file = self._export_spo2_csv(user_data.spo2_data)
+            exported_files["csv"].append(spo2_file)
 
         logger.info(f"Exported {len(exported_files['csv'])} CSV files")
         print(f"  ✅ Created {len(exported_files['csv'])} CSV files")
@@ -227,7 +252,18 @@ class GarminExporter:
                     "Duration (hours)": sleep.total_sleep_hours,
                     "Minutes Asleep": sleep.minutes_asleep or 0,
                     "Minutes Awake": sleep.minutes_awake or 0,
+                    "Minutes REM": sleep.minutes_rem or 0,
+                    "Minutes Light Sleep": sleep.minutes_light or 0,
+                    "Minutes Deep Sleep": sleep.minutes_deep or 0,
+                    "Minutes Wake in Sleep": sleep.minutes_wake or 0,
                     "Sleep Efficiency": sleep.efficiency or 0,
+                    "Sleep Score": sleep.sleep_score or "",
+                    "Awakening Count": sleep.awakening_count or "",
+                    "Breathing Rate": sleep.breathing_rate or "",
+                    "Avg HR During Sleep": sleep.heart_rate_avg or "",
+                    "Min HR During Sleep": sleep.heart_rate_min or "",
+                    "Skin Temp Deviation": sleep.temperature_variation or "",
+                    "Sleep Type": sleep.type or "",
                     "Minutes to Fall Asleep": sleep.minutes_to_fall_asleep or 0,
                     "Minutes After Wakeup": sleep.minutes_after_wakeup or 0,
                     "Time in Bed": sleep.time_in_bed or 0,
@@ -241,29 +277,69 @@ class GarminExporter:
         return str(sleep_file)
 
     def _export_body_composition_csv(self, body_data: List[BodyComposition]) -> str:
-        """Export body composition data to CSV format."""
+        """Export body composition data to two CSV files:
+        1. fitbit_body_composition.csv — full raw data for reference.
+        2. garmin_body_composition_import.csv — Garmin Connect importable format.
+
+        Garmin Connect CSV body import format (verified):
+          Line 1: "Body"
+          Line 2: header — Date,Weight,BMI,Fat
+          Data:   weight in kg, fat as percentage (e.g. 18.5 = 18.5%)
+
+        Weight unit heuristic: Fitbit exports weight in lbs for US-locale accounts and
+        in kg for metric accounts. No unit field is present in the JSON. Values above
+        _LBS_THRESHOLD (100) are assumed to be in lbs and are converted to kg.
+        Verify the output if your weight is near this threshold.
+        """
         body_file = self.output_dir / "fitbit_body_composition.csv"
+        garmin_file = self.output_dir / "garmin_body_composition_import.csv"
 
         body_records = []
+        garmin_records = []
+
         for body in body_data:
+            # Raw data export (label clearly that unit depends on Fitbit account locale)
             body_records.append(
                 {
                     "Date": body.date.strftime("%Y-%m-%d"),
-                    "Weight (kg)": body.weight,
+                    "Weight (raw, lbs for US / kg for metric)": body.weight,
                     "BMI": body.bmi,
                     "Body Fat %": body.body_fat_percentage,
-                    "Lean Mass (kg)": body.lean_mass,
-                    "Muscle Mass (kg)": body.muscle_mass,
-                    "Bone Mass (kg)": body.bone_mass,
+                    "Lean Mass (raw)": body.lean_mass,
+                    "Muscle Mass (raw)": body.muscle_mass,
+                    "Bone Mass (raw)": body.bone_mass,
                     "Water %": body.water_percentage,
                 }
             )
 
+            # Garmin Connect importable format — weight must be in kg
+            if body.weight is not None:
+                weight_kg = (
+                    round(body.weight * _LBS_TO_KG, 2)
+                    if body.weight > _LBS_THRESHOLD
+                    else round(body.weight, 2)
+                )
+                garmin_records.append(
+                    {
+                        "Date": body.date.strftime("%Y-%m-%d"),
+                        "Weight": weight_kg,
+                        "BMI": round(body.bmi, 2) if body.bmi else "",
+                        "Fat": round(body.body_fat_percentage, 2) if body.body_fat_percentage else "",
+                    }
+                )
+
         df = pd.DataFrame(body_records)
         df.to_csv(body_file, index=False)
-        logger.info(
-            f"Exported {len(body_records)} body composition records to {body_file}"
-        )
+        logger.info(f"Exported {len(body_records)} body composition records to {body_file}")
+
+        if garmin_records:
+            with open(garmin_file, "w", newline="", encoding="utf-8") as f:
+                f.write("Body\n")
+                writer = csv.DictWriter(f, fieldnames=["Date", "Weight", "BMI", "Fat"])
+                writer.writeheader()
+                writer.writerows(garmin_records)
+            logger.info(f"Created Garmin Connect importable body composition file: {garmin_file}")
+            print(f"    ℹ️  garmin_body_composition_import.csv ready — upload at Garmin Connect > Import Data")
 
         return str(body_file)
 
@@ -477,6 +553,68 @@ class GarminExporter:
             logger.info(f"Created empty heart rate zones file: {hr_zones_file}")
 
         return str(hr_zones_file)
+
+    def _export_stress_csv(self, stress_data: List[StressData]) -> str:
+        """Export stress management score data to CSV."""
+        stress_file = self.output_dir / "fitbit_stress.csv"
+
+        records = []
+        for stress in stress_data:
+            records.append(
+                {
+                    "Date": stress.date.strftime("%Y-%m-%d"),
+                    "Stress Score (0-100, higher = less stress)": stress.stress_score or "",
+                    "Stress Level": stress.stress_level or "",
+                }
+            )
+
+        df = pd.DataFrame(records)
+        df.to_csv(stress_file, index=False)
+        logger.info(f"Exported {len(records)} stress records to {stress_file}")
+        return str(stress_file)
+
+    def _export_temperature_csv(self, temperature_data: List[TemperatureData]) -> str:
+        """Export skin temperature deviation data to CSV.
+
+        Note: This is a nightly relative deviation from the user's personal baseline,
+        NOT an absolute body temperature. Positive = warmer, negative = cooler.
+        """
+        temp_file = self.output_dir / "fitbit_skin_temperature.csv"
+
+        records = []
+        for temp in temperature_data:
+            records.append(
+                {
+                    "Date": temp.date.strftime("%Y-%m-%d"),
+                    "Skin Temp Deviation (°C from baseline)": temp.temperature_celsius or "",
+                }
+            )
+
+        df = pd.DataFrame(records)
+        df.to_csv(temp_file, index=False)
+        logger.info(f"Exported {len(records)} skin temperature records to {temp_file}")
+        return str(temp_file)
+
+    def _export_spo2_csv(self, spo2_data: List[SpO2Data]) -> str:
+        """Export blood oxygen saturation (SpO2) data to CSV."""
+        spo2_file = self.output_dir / "fitbit_spo2.csv"
+
+        records = []
+        for spo2 in spo2_data:
+            records.append(
+                {
+                    "Date": spo2.date.strftime("%Y-%m-%d"),
+                    "SpO2 %": spo2.spo2_percentage or "",
+                    "Timestamp": spo2.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                    if spo2.timestamp
+                    else "",
+                }
+            )
+
+        df = pd.DataFrame(records)
+        df.to_csv(spo2_file, index=False)
+        logger.info(f"Exported {len(records)} SpO2 records to {spo2_file}")
+        return str(spo2_file)
 
     def export_garmin_import_ready(self, user_data: FitbitUserData) -> Dict[str, str]:
         """Export data in formats ready for Garmin Connect import."""
