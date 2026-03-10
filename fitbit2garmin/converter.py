@@ -337,34 +337,41 @@ class DataConverter:
         """Map our activity type to TCX sport type with comprehensive Garmin Connect compatibility."""
         # Comprehensive mapping based on official Garmin TCX schema and Connect import behavior
         # These are the sport types that Garmin Connect recognizes and properly categorizes
+        # TCX schema only officially supports Running, Biking, Other;
+        # Garmin Connect also accepts Walking and Swimming in practice.
         mapping = {
             "running": "Running",
             "walking": "Walking",
             "biking": "Biking",
-            "hiking": "Walking",  # Garmin Connect imports hiking as walking
+            "indoor_cycling": "Biking",
+            "hiking": "Walking",
             "swimming": "Swimming",
-            "treadmill": "Running",  # Treadmill runs are imported as running
-            "elliptical": "Other",  # Elliptical gets better recognition as Other
-            "rowing": "Other",  # Rowing gets better recognition as Other
-            "workout": "Other",  # Generic workouts
-            "yoga": "Other",  # Yoga gets better recognition as Other
-            "weights": "Other",  # Weight training gets better recognition as Other
-            "sport": "Other",  # Generic sports
-            "tennis": "Other",  # Tennis gets better recognition as Other
-            "basketball": "Other",  # Basketball gets better recognition as Other
-            "soccer": "Other",  # Soccer gets better recognition as Other
-            "football": "Other",  # Football gets better recognition as Other
-            "volleyball": "Other",  # Volleyball gets better recognition as Other
-            "golf": "Other",  # Golf gets better recognition as Other
-            "skiing": "Other",  # Skiing gets better recognition as Other
-            "snowboarding": "Other",  # Snowboarding gets better recognition as Other
-            "dance": "Other",  # Dance gets better recognition as Other
-            "martial_arts": "Other",  # Martial arts gets better recognition as Other
-            "boxing": "Other",  # Boxing gets better recognition as Other
-            "climbing": "Other",  # Climbing gets better recognition as Other
-            "aerobic": "Other",  # Aerobic gets better recognition as Other
-            "crossfit": "Other",  # CrossFit gets better recognition as Other
-            "abs": "Other",  # Ab workouts get better recognition as Other
+            "treadmill": "Running",
+            "elliptical": "Other",
+            "rowing": "Other",
+            "workout": "Other",
+            "yoga": "Other",
+            "pilates": "Other",
+            "weights": "Other",
+            "abs": "Other",
+            "crossfit": "Other",
+            "hiit": "Other",
+            "aerobic": "Other",
+            "dance": "Other",
+            "martial_arts": "Other",
+            "boxing": "Other",
+            "climbing": "Other",
+            "stair_climbing": "Other",
+            "paddle_sports": "Other",
+            "sport": "Other",
+            "tennis": "Other",
+            "basketball": "Other",
+            "soccer": "Other",
+            "football": "Other",
+            "volleyball": "Other",
+            "golf": "Other",
+            "skiing": "Other",
+            "snowboarding": "Other",
             "other": "Other",
         }
 
@@ -575,7 +582,10 @@ class DataConverter:
         try:
             from fit_tool.profile.profile_type import Sport, SubSport
 
-            # Comprehensive mapping for FIT sports
+            # Comprehensive mapping for FIT sports.
+            # Note: Sport.YOGA, Sport.STRENGTH_TRAINING, Sport.DANCING,
+            # Sport.MARTIAL_ARTS, and SubSport.CROSS_TRAINING do NOT exist in
+            # fit-tool — use Training sport with appropriate sub-sport instead.
             mapping = {
                 "running": (Sport.RUNNING, SubSport.GENERIC),
                 "walking": (Sport.WALKING, SubSport.GENERIC),
@@ -586,22 +596,29 @@ class DataConverter:
                 "elliptical": (Sport.FITNESS_EQUIPMENT, SubSport.ELLIPTICAL),
                 "rowing": (Sport.ROWING, SubSport.GENERIC),
                 "workout": (Sport.TRAINING, SubSport.CARDIO_TRAINING),
-                "yoga": (Sport.YOGA, SubSport.GENERIC),
-                "weights": (Sport.STRENGTH_TRAINING, SubSport.GENERIC),
+                "yoga": (Sport.TRAINING, SubSport.YOGA),
+                "pilates": (Sport.TRAINING, SubSport.PILATES),
+                "weights": (Sport.TRAINING, SubSport.STRENGTH_TRAINING),
+                "abs": (Sport.TRAINING, SubSport.STRENGTH_TRAINING),
+                "crossfit": (Sport.TRAINING, SubSport.STRENGTH_TRAINING),
+                "hiit": (Sport.TRAINING, SubSport.CARDIO_TRAINING),
+                "aerobic": (Sport.TRAINING, SubSport.CARDIO_TRAINING),
+                "dance": (Sport.TRAINING, SubSport.CARDIO_TRAINING),
+                "martial_arts": (Sport.TRAINING, SubSport.CARDIO_TRAINING),
+                "indoor_cycling": (Sport.CYCLING, SubSport.INDOOR_CYCLING),
+                "stair_climbing": (Sport.FITNESS_EQUIPMENT, SubSport.STAIR_CLIMBING),
+                "paddle_sports": (Sport.PADDLING, SubSport.GENERIC),
                 "tennis": (Sport.TENNIS, SubSport.GENERIC),
                 "basketball": (Sport.BASKETBALL, SubSport.GENERIC),
                 "soccer": (Sport.SOCCER, SubSport.GENERIC),
                 "football": (Sport.AMERICAN_FOOTBALL, SubSport.GENERIC),
-                "volleyball": (Sport.VOLLEYBALL, SubSport.GENERIC),
+                "volleyball": (Sport.GENERIC, SubSport.MATCH),
                 "golf": (Sport.GOLF, SubSport.GENERIC),
                 "skiing": (Sport.ALPINE_SKIING, SubSport.GENERIC),
                 "snowboarding": (Sport.SNOWBOARDING, SubSport.GENERIC),
-                "dance": (Sport.DANCING, SubSport.GENERIC),
-                "martial_arts": (Sport.MARTIAL_ARTS, SubSport.GENERIC),
                 "boxing": (Sport.BOXING, SubSport.GENERIC),
                 "climbing": (Sport.ROCK_CLIMBING, SubSport.GENERIC),
-                "aerobic": (Sport.FITNESS_EQUIPMENT, SubSport.CARDIO_TRAINING),
-                "crossfit": (Sport.TRAINING, SubSport.CROSS_TRAINING),
+                "sport": (Sport.GENERIC, SubSport.GENERIC),
             }
 
             return mapping.get(activity_type.value, (Sport.GENERIC, SubSport.GENERIC))

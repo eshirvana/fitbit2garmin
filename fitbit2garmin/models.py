@@ -38,6 +38,11 @@ class ActivityType(str, Enum):
     MARTIAL_ARTS = "martial_arts"
     BOXING = "boxing"
     CLIMBING = "climbing"
+    PILATES = "pilates"
+    HIIT = "hiit"
+    INDOOR_CYCLING = "indoor_cycling"
+    STAIR_CLIMBING = "stair_climbing"
+    PADDLE_SPORTS = "paddle_sports"
     OTHER = "other"
 
 
@@ -122,17 +127,41 @@ class ActivityData(BaseModel):
         """Parse activity type from Fitbit format."""
         if isinstance(v, str):
             v = v.lower()
-            # Map common Fitbit activity names to our enum
+            # Map activity name strings to enum
             type_mapping = {
                 "running": ActivityType.RUN,
                 "walking": ActivityType.WALK,
                 "cycling": ActivityType.BIKE,
+                "biking": ActivityType.BIKE,
                 "hiking": ActivityType.HIKE,
                 "swimming": ActivityType.SWIM,
+                "treadmill": ActivityType.TREADMILL,
+                "elliptical": ActivityType.ELLIPTICAL,
+                "rowing": ActivityType.ROWING,
                 "workout": ActivityType.WORKOUT,
                 "yoga": ActivityType.YOGA,
+                "pilates": ActivityType.PILATES,
                 "weights": ActivityType.WEIGHTS,
+                "abs": ActivityType.ABS,
+                "crossfit": ActivityType.CROSSFIT,
+                "hiit": ActivityType.HIIT,
+                "aerobic": ActivityType.AEROBIC,
+                "dance": ActivityType.DANCE,
+                "martial_arts": ActivityType.MARTIAL_ARTS,
+                "boxing": ActivityType.BOXING,
+                "climbing": ActivityType.CLIMBING,
+                "indoor_cycling": ActivityType.INDOOR_CYCLING,
+                "stair_climbing": ActivityType.STAIR_CLIMBING,
+                "paddle_sports": ActivityType.PADDLE_SPORTS,
                 "sport": ActivityType.SPORT,
+                "tennis": ActivityType.TENNIS,
+                "basketball": ActivityType.BASKETBALL,
+                "soccer": ActivityType.SOCCER,
+                "football": ActivityType.FOOTBALL,
+                "volleyball": ActivityType.VOLLEYBALL,
+                "golf": ActivityType.GOLF,
+                "skiing": ActivityType.SKIING,
+                "snowboarding": ActivityType.SNOWBOARDING,
             }
             return type_mapping.get(v, ActivityType.OTHER)
         return v

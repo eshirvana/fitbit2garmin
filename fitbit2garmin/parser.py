@@ -506,27 +506,32 @@ class FitbitParser:
                 90014: ActivityType.WALK,  # Outdoor Walk
                 90012: ActivityType.HIKE,  # Hike
                 # Cycling
-                90001: ActivityType.BIKE,  # Bike
+                90001: ActivityType.BIKE,  # Bike / Outdoor Bike
                 1071: ActivityType.BIKE,  # Outdoor Bike
-                20008: ActivityType.BIKE,  # Stationary Bike
+                20008: ActivityType.INDOOR_CYCLING,  # Stationary Bike / Spin
+                90003: ActivityType.INDOOR_CYCLING,  # Indoor Cycling
                 # Water Sports
                 90024: ActivityType.SWIM,  # Swimming
                 90026: ActivityType.SWIM,  # Pool Swimming
                 90025: ActivityType.SWIM,  # Open Water Swimming
                 # Gym Equipment
                 20047: ActivityType.ELLIPTICAL,  # Elliptical
-                20001: ActivityType.OTHER,  # Stair Climber
+                20001: ActivityType.STAIR_CLIMBING,  # Stair Climber
                 20010: ActivityType.ROWING,  # Rowing Machine
-                # Strength Training
+                20002: ActivityType.STAIR_CLIMBING,  # Stair Stepper
+                # Strength & Conditioning
                 91045: ActivityType.WEIGHTS,  # Weights
                 3000: ActivityType.WORKOUT,  # Workout
                 3001: ActivityType.AEROBIC,  # Aerobic Workout
                 2131: ActivityType.CROSSFIT,  # CrossFit
                 3101: ActivityType.ABS,  # 10 Minute Abs
                 3102: ActivityType.AEROBIC,  # Warm It Up
-                3013: ActivityType.CROSSFIT,  # HIIT
-                3014: ActivityType.CROSSFIT,  # Bootcamp
+                3013: ActivityType.HIIT,  # HIIT
+                3014: ActivityType.HIIT,  # Bootcamp
                 90004: ActivityType.WORKOUT,  # Interval Workout
+                90016: ActivityType.WEIGHTS,  # Circuit Training
+                90017: ActivityType.AEROBIC,  # Kickboxing (cardio variant)
+                90020: ActivityType.WORKOUT,  # Functional Strength Training
                 # Sports
                 15675: ActivityType.TENNIS,  # Tennis
                 15000: ActivityType.SPORT,  # Sport
@@ -535,141 +540,160 @@ class FitbitParser:
                 15040: ActivityType.VOLLEYBALL,  # Volleyball
                 15050: ActivityType.FOOTBALL,  # Football
                 15060: ActivityType.GOLF,  # Golf
-                15070: ActivityType.SKIING,  # Skiing
+                15070: ActivityType.SKIING,  # Alpine Skiing
                 15080: ActivityType.SNOWBOARDING,  # Snowboarding
                 15090: ActivityType.MARTIAL_ARTS,  # Martial Arts
                 15100: ActivityType.BOXING,  # Boxing
                 15120: ActivityType.CLIMBING,  # Rock Climbing
+                15140: ActivityType.SPORT,  # Baseball
+                15150: ActivityType.SPORT,  # Hockey
+                15160: ActivityType.SPORT,  # Cricket
+                15170: ActivityType.TENNIS,  # Racquetball
+                15180: ActivityType.TENNIS,  # Squash
+                15190: ActivityType.TENNIS,  # Badminton
+                15200: ActivityType.SPORT,  # Rugby
+                15210: ActivityType.SPORT,  # Lacrosse
+                15220: ActivityType.SPORT,  # Archery
+                15230: ActivityType.SPORT,  # Fencing
+                15240: ActivityType.SPORT,  # Table Tennis
+                15250: ActivityType.SPORT,  # Polo
+                15260: ActivityType.PADDLE_SPORTS,  # Kayaking
+                15270: ActivityType.PADDLE_SPORTS,  # Paddleboarding
+                15280: ActivityType.PADDLE_SPORTS,  # Canoeing
+                15290: ActivityType.SPORT,  # Surfing
                 # Mind-Body
                 15110: ActivityType.YOGA,  # Yoga
-                15130: ActivityType.YOGA,  # Pilates
-                # Dance & Other
+                15130: ActivityType.PILATES,  # Pilates
+                15300: ActivityType.YOGA,  # Tai Chi
+                15310: ActivityType.YOGA,  # Barre
+                # Dance
                 20030: ActivityType.DANCE,  # Dance
                 90005: ActivityType.DANCE,  # Zumba
+                90011: ActivityType.DANCE,  # Aerobic Dance
+                # Cardio & Other
                 90006: ActivityType.MARTIAL_ARTS,  # Kickboxing
-                90007: ActivityType.AEROBIC,  # Step
+                90007: ActivityType.AEROBIC,  # Step Aerobics
                 90008: ActivityType.AEROBIC,  # Cardio
-                # Additional Common IDs
-                1: ActivityType.WALK,  # Walk
-                2: ActivityType.RUN,  # Run
-                3: ActivityType.BIKE,  # Bike
-                4: ActivityType.SWIM,  # Swim
-                5: ActivityType.HIKE,  # Hike
-                6: ActivityType.WEIGHTS,  # Weights
-                7: ActivityType.WORKOUT,  # Workout
-                8: ActivityType.YOGA,  # Yoga
-                9: ActivityType.SPORT,  # Sport
-                10: ActivityType.TENNIS,  # Tennis
+                90010: ActivityType.HIIT,  # Boot Camp
+                90015: ActivityType.AEROBIC,  # Jump Rope
+                # Skiing variants
+                90021: ActivityType.SKIING,  # Cross-Country Skiing
+                90022: ActivityType.SKIING,  # Downhill Skiing
+                90023: ActivityType.SNOWBOARDING,  # Snowboarding
+                # Additional Common / Low-value IDs
+                1: ActivityType.WALK,
+                2: ActivityType.RUN,
+                3: ActivityType.BIKE,
+                4: ActivityType.SWIM,
+                5: ActivityType.HIKE,
+                6: ActivityType.WEIGHTS,
+                7: ActivityType.WORKOUT,
+                8: ActivityType.YOGA,
+                9: ActivityType.SPORT,
+                10: ActivityType.TENNIS,
             }
 
             if activity_type_id in fitbit_id_mapping:
                 return fitbit_id_mapping[activity_type_id]
 
-        # Fallback to enhanced activity name mapping
+        # Fallback to activity name mapping (ordered most-specific first)
         name_lower = activity_name.lower()
 
-        # Running variations
-        if any(word in name_lower for word in ["run", "jog", "running", "jogging"]):
-            return ActivityType.RUN
-        # Walking variations
-        elif any(word in name_lower for word in ["walk", "walking"]):
-            return ActivityType.WALK
-        # Cycling variations
-        elif any(
-            word in name_lower
-            for word in ["bike", "cycling", "bicycle", "biking", "cycle"]
-        ):
-            return ActivityType.BIKE
-        # Hiking variations
-        elif any(word in name_lower for word in ["hike", "hiking", "trail"]):
-            return ActivityType.HIKE
-        # Swimming variations
-        elif any(word in name_lower for word in ["swim", "swimming", "pool", "water"]):
-            return ActivityType.SWIM
-        # Treadmill variations
-        elif any(word in name_lower for word in ["treadmill", "tread mill"]):
+        # Treadmill (before "run" to avoid partial match)
+        if any(w in name_lower for w in ["treadmill", "tread mill"]):
             return ActivityType.TREADMILL
-        # Elliptical variations
-        elif any(word in name_lower for word in ["elliptical", "cross trainer"]):
+        # Running
+        elif any(w in name_lower for w in ["run", "jog", "running", "jogging", "sprint"]):
+            return ActivityType.RUN
+        # Hiking (before "walk" to avoid partial match)
+        elif any(w in name_lower for w in ["hike", "hiking", "trail run", "trekking"]):
+            return ActivityType.HIKE
+        # Walking
+        elif any(w in name_lower for w in ["walk", "walking", "stroll"]):
+            return ActivityType.WALK
+        # Indoor Cycling / Spin (before generic "bike")
+        elif any(w in name_lower for w in ["spin", "indoor cycling", "stationary bike", "indoor bike"]):
+            return ActivityType.INDOOR_CYCLING
+        # Cycling
+        elif any(w in name_lower for w in ["bike", "cycling", "bicycle", "biking", "cycle"]):
+            return ActivityType.BIKE
+        # Swimming
+        elif any(w in name_lower for w in ["swim", "swimming", "pool swim", "open water"]):
+            return ActivityType.SWIM
+        # Elliptical
+        elif any(w in name_lower for w in ["elliptical", "cross trainer"]):
             return ActivityType.ELLIPTICAL
-        # Rowing variations
-        elif any(word in name_lower for word in ["rowing", "row"]):
+        # Stair Climbing
+        elif any(w in name_lower for w in ["stair", "step mill", "stairmaster", "step climber"]):
+            return ActivityType.STAIR_CLIMBING
+        # Rowing
+        elif any(w in name_lower for w in ["rowing", "row machine", "ergometer", "erg"]):
             return ActivityType.ROWING
-        # Tennis variations
-        elif any(word in name_lower for word in ["tennis", "racquet", "racket"]):
+        # Paddle Sports
+        elif any(w in name_lower for w in ["kayak", "paddle", "canoe", "sup", "paddleboard"]):
+            return ActivityType.PADDLE_SPORTS
+        # Tennis / Racquet sports
+        elif any(w in name_lower for w in ["tennis", "racquet", "racket", "squash", "badminton", "racquetball"]):
             return ActivityType.TENNIS
-        # Basketball variations
-        elif any(word in name_lower for word in ["basketball", "bball"]):
+        # Basketball
+        elif any(w in name_lower for w in ["basketball", "bball"]):
             return ActivityType.BASKETBALL
-        # Soccer variations
-        elif any(
-            word in name_lower
-            for word in ["soccer", "football" if "american" not in name_lower else ""]
-        ):
-            return ActivityType.SOCCER
-        # American Football variations
-        elif any(word in name_lower for word in ["american football", "nfl"]):
+        # American Football (before "football" / "soccer" to avoid confusion)
+        elif any(w in name_lower for w in ["american football", "nfl", "flag football"]):
             return ActivityType.FOOTBALL
-        # Volleyball variations
-        elif any(word in name_lower for word in ["volleyball", "vball"]):
+        # Soccer
+        elif any(w in name_lower for w in ["soccer", "football"]):
+            return ActivityType.SOCCER
+        # Volleyball
+        elif any(w in name_lower for w in ["volleyball", "vball", "beach volleyball"]):
             return ActivityType.VOLLEYBALL
-        # Golf variations
-        elif any(word in name_lower for word in ["golf"]):
+        # Golf
+        elif "golf" in name_lower:
             return ActivityType.GOLF
-        # Skiing variations
-        elif any(word in name_lower for word in ["skiing", "ski"]):
-            return ActivityType.SKIING
-        # Snowboarding variations
-        elif any(word in name_lower for word in ["snowboarding", "snowboard"]):
+        # Snowboarding (before "ski" to avoid partial match)
+        elif any(w in name_lower for w in ["snowboard", "snowboarding"]):
             return ActivityType.SNOWBOARDING
-        # Dance variations
-        elif any(word in name_lower for word in ["dance", "zumba", "dancing"]):
+        # Skiing
+        elif any(w in name_lower for w in ["ski", "skiing", "cross-country ski"]):
+            return ActivityType.SKIING
+        # Dance
+        elif any(w in name_lower for w in ["dance", "zumba", "dancing", "aerobic dance"]):
             return ActivityType.DANCE
-        # Martial Arts variations
-        elif any(
-            word in name_lower
-            for word in ["martial arts", "karate", "taekwondo", "judo", "kickboxing"]
-        ):
-            return ActivityType.MARTIAL_ARTS
-        # Boxing variations
-        elif any(word in name_lower for word in ["boxing", "box"]):
-            return ActivityType.BOXING
-        # Climbing variations
-        elif any(word in name_lower for word in ["climbing", "climb", "rock climbing"]):
-            return ActivityType.CLIMBING
-        # Aerobic variations
-        elif any(word in name_lower for word in ["aerobic", "cardio", "step"]):
-            return ActivityType.AEROBIC
-        # Ab workout variations
-        elif any(word in name_lower for word in ["abs", "core", "abdominal"]):
-            return ActivityType.ABS
-        # CrossFit variations
-        elif any(
-            word in name_lower for word in ["crossfit", "cross fit", "hiit", "bootcamp"]
-        ):
-            return ActivityType.CROSSFIT
-        # Weight training variations
-        elif any(
-            word in name_lower
-            for word in ["weight", "strength", "lifting", "barbell", "dumbbell"]
-        ):
-            return ActivityType.WEIGHTS
-        # Yoga variations
-        elif any(
-            word in name_lower
-            for word in ["yoga", "pilates", "stretching", "meditation"]
-        ):
+        # Pilates (before "yoga")
+        elif any(w in name_lower for w in ["pilates", "barre"]):
+            return ActivityType.PILATES
+        # Yoga / stretching / mindfulness
+        elif any(w in name_lower for w in ["yoga", "tai chi", "stretching", "meditation", "flexibility"]):
             return ActivityType.YOGA
-        # Generic sports variations
-        elif any(
-            word in name_lower for word in ["sport", "baseball", "hockey", "cricket"]
-        ):
+        # Boxing
+        elif any(w in name_lower for w in ["boxing", "box", "punching"]):
+            return ActivityType.BOXING
+        # Martial Arts / Kickboxing
+        elif any(w in name_lower for w in ["martial arts", "karate", "taekwondo", "judo", "kickboxing", "mma", "jiu-jitsu", "kung fu"]):
+            return ActivityType.MARTIAL_ARTS
+        # Climbing
+        elif any(w in name_lower for w in ["climb", "climbing", "rock climb", "bouldering"]):
+            return ActivityType.CLIMBING
+        # HIIT / Bootcamp (before "crossfit")
+        elif any(w in name_lower for w in ["hiit", "bootcamp", "boot camp", "interval training", "tabata"]):
+            return ActivityType.HIIT
+        # CrossFit
+        elif any(w in name_lower for w in ["crossfit", "cross fit"]):
+            return ActivityType.CROSSFIT
+        # Ab workouts
+        elif any(w in name_lower for w in ["abs", "core", "abdominal", "crunch"]):
+            return ActivityType.ABS
+        # Weight / Strength training
+        elif any(w in name_lower for w in ["weight", "strength", "lifting", "barbell", "dumbbell", "resistance", "circuit"]):
+            return ActivityType.WEIGHTS
+        # Generic aerobic / cardio
+        elif any(w in name_lower for w in ["aerobic", "cardio", "step aerobic", "jump rope"]):
+            return ActivityType.AEROBIC
+        # Other sports (baseball, hockey, rugby, etc.)
+        elif any(w in name_lower for w in ["sport", "baseball", "hockey", "cricket", "rugby", "lacrosse", "handball"]):
             return ActivityType.SPORT
-        # Generic workout variations
-        elif any(
-            word in name_lower
-            for word in ["workout", "exercise", "training", "fitness"]
-        ):
+        # Generic workout / training
+        elif any(w in name_lower for w in ["workout", "exercise", "training", "fitness", "gym"]):
             return ActivityType.WORKOUT
         else:
             return ActivityType.OTHER
