@@ -271,6 +271,12 @@ class FitbitUserData(BaseModel):
     daily_metrics: List[DailyMetrics] = []
     body_composition: List[BodyComposition] = []
     heart_rate_data: List[HeartRateData] = []
+    # Precomputed daily HR aggregates produced by the parser to avoid storing
+    # millions of per-reading HeartRateData objects in memory.
+    # Each entry: {"date": "YYYY-MM-DD", "avg_bpm": int, "min_bpm": int,
+    #              "max_bpm": int, "resting_bpm": int,
+    #              "total_readings": int, "hc_readings": int}
+    heart_rate_daily_stats: List[Dict[str, Any]] = []
     heart_rate_variability: List[HeartRateVariability] = []
     stress_data: List[StressData] = []
     temperature_data: List[TemperatureData] = []

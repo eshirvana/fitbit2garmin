@@ -250,7 +250,13 @@ class FitbitParser:
                 # Fallback to regular parsing if streaming fails
                 pass
 
-        # Regular JSON parsing for smaller files or when streaming fails
+        # Regular JSON parsing — orjson is 2-5× faster than stdlib json
+        try:
+            import orjson
+            with open(file_path, "rb") as f:
+                return orjson.loads(f.read())
+        except Exception:
+            pass
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -274,7 +280,9 @@ class FitbitParser:
         user_data.sleep_data = self._parse_sleep_data()
 
         print("❤️ Parsing heart rate data...")
-        user_data.heart_rate_data = self._parse_heart_rate_data()
+        hr_data, hr_daily_stats = self._parse_heart_rate_data()
+        user_data.heart_rate_data = hr_data
+        user_data.heart_rate_daily_stats = hr_daily_stats
 
         print("🏋️ Parsing body composition...")
         user_data.body_composition = self._parse_body_composition()
@@ -703,15 +711,13 @@ class FitbitParser:
                     for json_file in sleep_files:
                         pbar.set_description(f"    😴 Processing {json_file.name}")
                         try:
-                            with open(json_file, "r", encoding="utf-8") as f:
-                                data = json.load(f)
-
+                            data = self._parse_json_file_efficiently(json_file)
                             if isinstance(data, list):
                                 for item in data:
                                     sleep = self._parse_single_sleep_record(item)
                                     if sleep:
                                         sleep_data.append(sleep)
-                        except (json.JSONDecodeError, Exception) as e:
+                        except Exception as e:
                             logger.warning(f"Error parsing sleep file {json_file}: {e}")
                         pbar.update(1)
 
@@ -898,29 +904,31 @@ class FitbitParser:
         """Parse daily metrics from a specific path."""
         metrics = []
 
-        # Look for daily metrics files
-        json_files = list(path.glob("**/*.json"))
-
-        # Filter for daily metrics files
-        daily_files = []
-        for json_file in json_files:
-            file_name = json_file.name.lower()
-
-            # Include files that contain daily metrics
-            if any(
-                keyword in file_name
-                for keyword in ["steps", "distance", "calories", "floors", "elevation"]
-            ):
-                daily_files.append(json_file)
-            # Skip activity, sleep, and heart rate files
-            elif any(
-                skip in file_name
-                for skip in ["exercise", "activity", "sleep", "heart_rate"]
-            ):
-                continue
-            else:
-                # Include other potential daily files
-                daily_files.append(json_file)
+        # Only process files that are known Fitbit daily metric exports.
+        # Using an explicit allowlist avoids wasting time on the hundreds of other
+        # JSON files in Global Export Data (weight, oxygen, stress, HRV, etc.).
+        DAILY_METRIC_PREFIXES = (
+            "steps-",
+            "distance-",
+            "calories-",
+            "lightly_active_minutes-",
+            "fairly_active_minutes-",
+            "very_active_minutes-",
+            "minutessedentary-",
+            "sedentary_minutes-",
+            "floors-",
+            "elevation-",
+            "resting_heart_rate-",
+            "active_minutes-",
+            "minuteslightlyactive-",
+            "minutesfairlyactive-",
+            "minutesveryactive-",
+        )
+        json_files = list(path.glob("*.json"))  # no recursion needed; flat directory
+        daily_files = [
+            f for f in json_files
+            if f.name.lower().startswith(DAILY_METRIC_PREFIXES)
+        ]
 
         print(f"    📋 Found {len(daily_files)} daily metrics files")
 
@@ -932,9 +940,7 @@ class FitbitParser:
             for json_file in daily_files:
                 pbar.set_description(f"    📄 Processing {json_file.name}")
                 try:
-                    with open(json_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-
+                    data = self._parse_json_file_efficiently(json_file)
                     if isinstance(data, list):
                         for item in data:
                             metric = self._parse_single_daily_metric(item)
@@ -944,8 +950,7 @@ class FitbitParser:
                         metric = self._parse_single_daily_metric(data)
                         if metric:
                             metrics.append(metric)
-
-                except (json.JSONDecodeError, Exception) as e:
+                except Exception as e:
                     logger.warning(f"Error parsing daily metrics file {json_file}: {e}")
                 pbar.update(1)
 
@@ -981,159 +986,160 @@ class FitbitParser:
             logger.warning(f"Error parsing daily metric: {e}")
             return None
 
-    def _parse_heart_rate_data(self) -> List[HeartRateData]:
-        """Parse heart rate data from Fitbit exports."""
-        heart_rate_data = []
+    def _parse_heart_rate_data(self):
+        """Parse heart rate data from Fitbit exports.
+
+        Performance design: Fitbit records HR every ~5 seconds. Over 3 years that is
+        ~19 million readings. Storing each as a Pydantic object (~400 B) would consume
+        ~8 GB of RAM only to compute a daily-summary CSV at the end.
+
+        Instead we stream each file and accumulate lightweight per-day aggregates in a
+        plain dict. The result is a list of daily-summary dicts (~1 KB total per year).
+
+        Returns:
+            (List[HeartRateData], List[Dict]) — the HeartRateData list is always empty
+            (kept for backward compatibility); the Dict list contains one entry per day
+            with precomputed avg/min/max/resting statistics ready for the exporter.
+        """
+        import gc
+        import time
+        import psutil
+
+        # daily_agg[date_str] = {sum, count, min, max, hc_min, hc_count}
+        # Using plain ints/floats — no Pydantic overhead at all.
+        daily_agg: Dict[str, Dict] = {}
+        hr_files = []
 
         if "global_export" in self.data_directories:
             hr_path = self.data_directories["global_export"]
             print(f"  📁 Processing heart rate data from: {hr_path.name}")
-
             hr_files = list(hr_path.glob("heart_rate*.json"))
             print(f"    📋 Found {len(hr_files)} heart rate files")
 
-            # Optional: Limit processing for performance
-            # hr_files = hr_files[:10]  # Uncomment to process only first 10 files
+            try:
+                memory_gb = psutil.virtual_memory().available / (1024 ** 3)
+                total_size_mb = sum(f.stat().st_size for f in hr_files) / (1024 ** 2)
+                print(f"    📊 {len(hr_files)} files ({total_size_mb:.1f} MB), "
+                      f"{memory_gb:.1f} GB available memory")
+            except Exception:
+                pass
 
-            # Use parallel processing only for very large datasets and when enabled
-            # Also check memory usage to prevent system overload
             use_parallel = (
                 self.enable_parallel
                 and len(hr_files) > 50
                 and self._check_memory_usage()
             )
-            
-            # Report memory and processing information
-            import psutil
-            import time
+
             start_time = time.time()
-            
-            try:
-                memory_gb = psutil.virtual_memory().available / (1024**3)
-                total_size_mb = sum(f.stat().st_size for f in hr_files) / (1024**2)
-                logger.info(f"Heart rate processing: {len(hr_files)} files, {total_size_mb:.1f}MB total, {memory_gb:.1f}GB available memory")
-                print(f"    📊 {len(hr_files)} files ({total_size_mb:.1f}MB), {memory_gb:.1f}GB available memory")
-            except:
-                logger.info(f"Heart rate processing: {len(hr_files)} files")
-                print(f"    📊 {len(hr_files)} files to process")
 
             if use_parallel:
                 print("    🚀 Using parallel processing for heart rate data")
-                # Use smaller chunks to reduce memory usage
-                chunk_size = min(
-                    20, max(1, len(hr_files) // 20)
-                )  # Smaller chunks for better memory management
-                import gc
-
+                chunk_size = min(30, max(1, len(hr_files) // 20))
                 processed_files = 0
-                
-                with tqdm(
-                    total=len(hr_files), 
-                    desc="    💓 Processing HR files",
-                    unit="files",
-                    unit_scale=True
-                ) as pbar:
+
+                with tqdm(total=len(hr_files), desc="    💓 Processing HR files",
+                          unit="files") as pbar:
                     for i in range(0, len(hr_files), chunk_size):
-                        chunk = hr_files[i : i + chunk_size]
-                        
-                        # Process chunk with improved progress tracking
-                        chunk_start_time = time.time()
+                        chunk = hr_files[i: i + chunk_size]
                         chunk_results = self.parallel_processor.process_files_parallel_with_progress(
                             chunk, process_json_file_worker, pbar, processed_files
                         )
-                        
-                        chunk_duration = time.time() - chunk_start_time
                         processed_files += len(chunk)
-                        
-                        # Process the results from parallel processing
-                        records_added = 0
-                        for item in chunk_results:
-                            # Only process if item is a dictionary
-                            if isinstance(item, dict):
-                                hr_data = self._parse_single_heart_rate(item)
-                                if hr_data:
-                                    heart_rate_data.append(hr_data)
-                                    records_added += 1
 
-                        # Clean up memory after each chunk
+                        for item in chunk_results:
+                            if isinstance(item, dict):
+                                self._aggregate_hr_item(item, daily_agg)
+
                         del chunk_results
                         gc.collect()
-                        
-                        # Calculate processing stats
-                        elapsed_time = time.time() - start_time
-                        files_per_second = processed_files / elapsed_time if elapsed_time > 0 else 0
-                        remaining_files = len(hr_files) - processed_files
-                        eta_seconds = remaining_files / files_per_second if files_per_second > 0 else 0
-                        eta_minutes = int(eta_seconds / 60)
-                        
-                        # Update progress description with stats
-                        pbar.set_postfix({
-                            'records': len(heart_rate_data),
-                            'rate': f'{files_per_second:.1f} files/sec',
-                            'ETA': f'{eta_minutes}m' if eta_minutes > 0 else '<1m',
-                            'chunk_time': f'{chunk_duration:.1f}s'
-                        })
 
-                        # Log progress for large datasets
-                        if i % (chunk_size * 10) == 0:
-                            logger.info(
-                                f"Processed {processed_files}/{len(hr_files)} heart rate files, "
-                                f"found {len(heart_rate_data)} records, "
-                                f"rate: {files_per_second:.1f} files/sec"
-                            )
+                        elapsed = time.time() - start_time
+                        rate = processed_files / elapsed if elapsed > 0 else 0
+                        pbar.set_postfix({
+                            "days": len(daily_agg),
+                            "rate": f"{rate:.1f} files/s",
+                        })
             else:
-                # Sequential processing for small number of files
-                
-                with tqdm(
-                    total=len(hr_files),
-                    desc="    💓 Processing HR files",
-                    unit="files",
-                    unit_scale=True,
-                    leave=False
-                ) as pbar:
+                with tqdm(total=len(hr_files), desc="    💓 Processing HR files",
+                          unit="files", leave=False) as pbar:
                     for i, json_file in enumerate(hr_files):
                         try:
                             file_data = self._parse_json_file_efficiently(json_file)
-
                             if isinstance(file_data, list):
-                                records_added = 0
                                 for item in file_data:
-                                    hr_data = self._parse_single_heart_rate(item)
-                                    if hr_data:
-                                        heart_rate_data.append(hr_data)
-                                        records_added += 1
-                                        
-                                # Update progress with stats
-                                elapsed_time = time.time() - start_time
-                                files_per_second = (i + 1) / elapsed_time if elapsed_time > 0 else 0
-                                remaining_files = len(hr_files) - (i + 1)
-                                eta_seconds = remaining_files / files_per_second if files_per_second > 0 else 0
-                                eta_minutes = int(eta_seconds / 60)
-                                
-                                pbar.set_postfix({
-                                    'records': len(heart_rate_data),
-                                    'rate': f'{files_per_second:.1f} files/sec',
-                                    'ETA': f'{eta_minutes}m' if eta_minutes > 0 else '<1m',
-                                    'current': json_file.name[:20]  # Show current file name (truncated)
-                                })
-
-                        except (json.JSONDecodeError, Exception) as e:
-                            logger.warning(
-                                f"Error parsing heart rate file {json_file}: {e}"
-                            )
+                                    if isinstance(item, dict):
+                                        self._aggregate_hr_item(item, daily_agg)
+                        except Exception as e:
+                            logger.warning(f"Error parsing heart rate file {json_file}: {e}")
                         finally:
                             pbar.update(1)
 
-        # Performance summary
-        end_time = time.time()
-        total_processing_time = end_time - start_time
-        avg_files_per_second = len(hr_files) / total_processing_time if total_processing_time > 0 else 0
-        
-        logger.info(f"Parsed {len(heart_rate_data)} heart rate records from {len(hr_files)} files in {total_processing_time:.1f}s")
-        print(f"    ✅ Parsed {len(heart_rate_data)} heart rate records from {len(hr_files)} files")
-        print(f"    📈 Processing rate: {avg_files_per_second:.1f} files/sec, {total_processing_time:.1f}s total")
-        
-        return heart_rate_data
+                        elapsed = time.time() - start_time
+                        rate = (i + 1) / elapsed if elapsed > 0 else 0
+                        pbar.set_postfix({"days": len(daily_agg), "rate": f"{rate:.1f} f/s"})
+
+        total_time = time.time() - start_time if hr_files else 0
+        total_readings = sum(v["count"] for v in daily_agg.values())
+        logger.info(f"Aggregated {total_readings} HR readings into {len(daily_agg)} "
+                    f"daily summaries from {len(hr_files)} files in {total_time:.1f}s")
+        print(f"    ✅ Aggregated {total_readings:,} readings → {len(daily_agg)} daily summaries "
+              f"({total_time:.1f}s)")
+
+        # Convert aggregated dict to the list of daily-stat dicts expected by the exporter
+        daily_stats = []
+        for date_str, agg in sorted(daily_agg.items()):
+            resting = agg["hc_min"] if agg["hc_count"] > 0 else agg["min"]
+            daily_stats.append({
+                "date": date_str,
+                "avg_bpm": round(agg["sum"] / agg["count"]),
+                "min_bpm": agg["min"],
+                "max_bpm": agg["max"],
+                "resting_bpm": resting,
+                "total_readings": agg["count"],
+                "hc_readings": agg["hc_count"],
+            })
+
+        return [], daily_stats  # empty HeartRateData list + precomputed daily stats
+
+    def _aggregate_hr_item(self, item: Dict[str, Any], daily_agg: Dict) -> None:
+        """Aggregate a single raw HR JSON record into the per-day accumulator dict.
+
+        Avoids creating any Pydantic objects — just updates plain int totals.
+        """
+        datetime_str = item.get("dateTime", "")
+        if not datetime_str:
+            return
+        try:
+            try:
+                dt = datetime.strptime(datetime_str, "%m/%d/%y %H:%M:%S")
+            except ValueError:
+                dt = parse_datetime(datetime_str)
+        except Exception:
+            return
+
+        value = item.get("value", {})
+        if not isinstance(value, dict):
+            return
+        bpm = value.get("bpm", 0)
+        confidence = value.get("confidence", 0)
+        if not bpm or bpm <= 0:
+            return
+
+        day = dt.strftime("%Y-%m-%d")
+        if day not in daily_agg:
+            daily_agg[day] = {"sum": 0, "count": 0, "min": 9999, "max": 0,
+                               "hc_min": 9999, "hc_count": 0}
+        agg = daily_agg[day]
+        agg["sum"] += bpm
+        agg["count"] += 1
+        if bpm < agg["min"]:
+            agg["min"] = bpm
+        if bpm > agg["max"]:
+            agg["max"] = bpm
+        if confidence >= 2:
+            agg["hc_count"] += 1
+            if bpm < agg["hc_min"]:
+                agg["hc_min"] = bpm
 
     def _parse_single_heart_rate(self, data: Dict[str, Any]) -> Optional[HeartRateData]:
         """Parse a single heart rate record."""

@@ -70,9 +70,12 @@ class GarminExporter:
             exported_files["csv"].append(body_file)
 
         # Export heart rate data to CSV
-        if user_data.heart_rate_data:
+        if user_data.heart_rate_daily_stats or user_data.heart_rate_data:
             print("  ❤️ Exporting heart rate data...")
-            hr_file = self._export_heart_rate_csv(user_data.heart_rate_data)
+            hr_file = self._export_heart_rate_csv(
+                user_data.heart_rate_data,
+                user_data.heart_rate_daily_stats,
+            )
             exported_files["csv"].append(hr_file)
 
         # Export HRV data to CSV
@@ -343,46 +346,63 @@ class GarminExporter:
 
         return str(body_file)
 
-    def _export_heart_rate_csv(self, heart_rate_data: List[HeartRateData]) -> str:
-        """Export heart rate data to CSV format."""
+    def _export_heart_rate_csv(
+        self,
+        heart_rate_data: List[HeartRateData],
+        daily_stats: List[Dict] = None,
+    ) -> str:
+        """Export heart rate data to CSV format.
+
+        Prefers ``daily_stats`` (precomputed by the parser to avoid storing millions
+        of per-reading objects).  Falls back to aggregating ``heart_rate_data``
+        in-memory for backward compatibility.
+        """
         hr_file = self.output_dir / "fitbit_heart_rate.csv"
 
-        # Group by date to get daily summaries
-        daily_hr = {}
-        for hr in heart_rate_data:
-            date_key = hr.datetime.date()
-            if date_key not in daily_hr:
-                daily_hr[date_key] = {"readings": [], "high_confidence": []}
-
-            daily_hr[date_key]["readings"].append(hr.bpm)
-            if hr.confidence >= 2:  # High confidence readings
-                daily_hr[date_key]["high_confidence"].append(hr.bpm)
-
-        hr_records = []
-        for date_key, data in daily_hr.items():
-            readings = data["readings"]
-            high_conf = data["high_confidence"] if data["high_confidence"] else readings
-
-            hr_records.append(
+        if daily_stats:
+            # Fast path: stats were already aggregated during parsing
+            hr_records = [
                 {
-                    "Date": date_key.strftime("%Y-%m-%d"),
-                    "Average Heart Rate": sum(readings) / len(readings)
-                    if readings
-                    else 0,
-                    "Min Heart Rate": min(readings) if readings else 0,
-                    "Max Heart Rate": max(readings) if readings else 0,
-                    "Resting Heart Rate": min(high_conf) if high_conf else 0,
-                    "Total Readings": len(readings),
-                    "High Confidence Readings": len(high_conf),
+                    "Date": s["date"],
+                    "Average Heart Rate": s["avg_bpm"],
+                    "Min Heart Rate": s["min_bpm"],
+                    "Max Heart Rate": s["max_bpm"],
+                    "Resting Heart Rate": s["resting_bpm"],
+                    "Total Readings": s["total_readings"],
+                    "High Confidence Readings": s["hc_readings"],
                 }
-            )
+                for s in daily_stats
+            ]
+        else:
+            # Fallback: aggregate from per-reading list (legacy path)
+            daily_hr: Dict[str, Dict] = {}
+            for hr in heart_rate_data:
+                date_key = hr.datetime.strftime("%Y-%m-%d")
+                if date_key not in daily_hr:
+                    daily_hr[date_key] = {"readings": [], "high_confidence": []}
+                daily_hr[date_key]["readings"].append(hr.bpm)
+                if hr.confidence >= 2:
+                    daily_hr[date_key]["high_confidence"].append(hr.bpm)
+
+            hr_records = []
+            for date_key, data in sorted(daily_hr.items()):
+                readings = data["readings"]
+                high_conf = data["high_confidence"] or readings
+                hr_records.append(
+                    {
+                        "Date": date_key,
+                        "Average Heart Rate": round(sum(readings) / len(readings)) if readings else 0,
+                        "Min Heart Rate": min(readings) if readings else 0,
+                        "Max Heart Rate": max(readings) if readings else 0,
+                        "Resting Heart Rate": min(high_conf) if high_conf else 0,
+                        "Total Readings": len(readings),
+                        "High Confidence Readings": len(high_conf),
+                    }
+                )
 
         df = pd.DataFrame(hr_records)
         df.to_csv(hr_file, index=False)
-        logger.info(
-            f"Exported {len(hr_records)} daily heart rate summaries to {hr_file}"
-        )
-
+        logger.info(f"Exported {len(hr_records)} daily heart rate summaries to {hr_file}")
         return str(hr_file)
 
     def _export_activities_summary_csv(
