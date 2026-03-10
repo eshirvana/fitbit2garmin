@@ -410,8 +410,26 @@ class FitbitParser:
 
             # Parse optional fields
             calories = data.get("calories")
-            distance = data.get("distance")
             steps = data.get("steps")
+
+            # Normalize distance to km.
+            # Fitbit stores distance in the user's locale unit (miles for US accounts,
+            # km for metric accounts).  "distanceKm" is always km when present.
+            _MILES_TO_KM = 1.60934
+            distance_km = data.get("distanceKm")
+            if distance_km is not None:
+                distance = float(distance_km)
+            else:
+                distance_raw = data.get("distance")
+                distance_unit = (data.get("distanceUnit") or "Kilometer").strip()
+                if distance_raw is not None:
+                    distance = (
+                        float(distance_raw) * _MILES_TO_KM
+                        if distance_unit.lower() in ("mile", "miles")
+                        else float(distance_raw)
+                    )
+                else:
+                    distance = None
 
             # Parse heart rate zones
             heart_rate_zones = []

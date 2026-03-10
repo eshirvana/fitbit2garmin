@@ -14,10 +14,8 @@ from xml.dom import minidom
 
 from .models import ActivityData, FitbitUserData, HeartRateData
 
-# FIT protocol uses December 31, 1989 00:00:00 UTC as its epoch zero.
-# All FIT timestamps must be relative to this epoch, not Unix epoch (1970-01-01).
-# Offset in seconds between Unix epoch and FIT epoch.
-FIT_EPOCH_OFFSET = 631065600
+# fit-tool handles the FIT-protocol epoch (Dec 31 1989) internally.
+# All timestamp fields must be supplied as Unix milliseconds (int).
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +37,12 @@ class DataConverter:
         tcx_files = []
 
         for activity in activities:
-            if activity.gps_data or activity.heart_rate_zones:
-                tcx_file = self._generate_tcx_file(activity)
-                if tcx_file:
-                    tcx_files.append(tcx_file)
+            # Generate TCX for all activities — not just those with GPS or HR zones.
+            # Activities without GPS get time-based trackpoints; without HR zones
+            # they still carry lap-level average/max HR and step counts.
+            tcx_file = self._generate_tcx_file(activity)
+            if tcx_file:
+                tcx_files.append(tcx_file)
 
         logger.info(f"Generated {len(tcx_files)} TCX files")
         return tcx_files
@@ -430,18 +430,20 @@ class DataConverter:
 
             # Create FIT file builder
             builder = FitFileBuilder()
+            builder.auto_define = True
 
-            # File ID message
-            # FIT protocol epoch is Dec 31 1989; convert Unix timestamp accordingly.
-            start_fit_ts = int(activity.start_time.timestamp()) - FIT_EPOCH_OFFSET
-            end_fit_ts = start_fit_ts + (activity.duration_ms // 1000)
+            # fit-tool expects ALL timestamps as Unix milliseconds.
+            # It handles the FIT-epoch conversion (Dec 31 1989) internally.
+            start_ms = int(activity.start_time.timestamp() * 1000)
+            end_ms = start_ms + activity.duration_ms
 
             file_id = FileIdMessage()
             file_id.type = FileType.ACTIVITY
-            file_id.manufacturer = Manufacturer.FITBIT
+            # Manufacturer.FITBIT does not exist in fit-tool; use DEVELOPMENT (255)
+            file_id.manufacturer = Manufacturer.DEVELOPMENT
             file_id.product = 1
-            file_id.time_created = start_fit_ts
-            builder.add_message(file_id)
+            file_id.time_created = start_ms
+            builder.add(file_id)
 
             # Map activity type to FIT sport
             sport, sub_sport = self._map_activity_to_fit_sport(activity.activity_type)
@@ -450,8 +452,8 @@ class DataConverter:
             session = SessionMessage()
             session.sport = sport
             session.sub_sport = sub_sport
-            session.start_time = start_fit_ts
-            session.timestamp = end_fit_ts
+            session.start_time = start_ms
+            session.timestamp = end_ms
             session.total_elapsed_time = activity.duration_ms / 1000
             session.total_timer_time = (
                 activity.active_duration / 1000
@@ -496,14 +498,14 @@ class DataConverter:
                 if len(zone_times) >= 5:
                     session.time_in_hr_zone = zone_times[:5]
 
-            builder.add_message(session)
+            builder.add(session)
 
             # Lap message
             lap = LapMessage()
             lap.sport = sport
             lap.sub_sport = sub_sport
-            lap.start_time = start_fit_ts
-            lap.timestamp = end_fit_ts
+            lap.start_time = start_ms
+            lap.timestamp = end_ms
             lap.total_elapsed_time = activity.duration_ms / 1000
             lap.total_timer_time = (
                 activity.active_duration / 1000
@@ -540,7 +542,7 @@ class DataConverter:
                 if len(zone_times) >= 5:
                     lap.time_in_hr_zone = zone_times[:5]
 
-            builder.add_message(lap)
+            builder.add(lap)
 
             # Add GPS trackpoints if available
             if activity.gps_data and isinstance(activity.gps_data, list):
@@ -551,11 +553,12 @@ class DataConverter:
 
             # Activity message
             activity_msg = ActivityMessage()
-            activity_msg.timestamp = end_fit_ts
+            activity_msg.timestamp = end_ms
             activity_msg.type = 0  # Manual
             activity_msg.event = 26  # Activity
-            activity_msg.local_timestamp = end_fit_ts
-            builder.add_message(activity_msg)
+            # local_timestamp field takes Unix seconds (not ms)
+            activity_msg.local_timestamp = end_ms // 1000
+            builder.add(activity_msg)
 
             # Generate filename
             activity_type_name = activity.activity_type.value.replace("_", "-")
@@ -649,9 +652,18 @@ class DataConverter:
 
                 record = RecordMessage()
 
-                # Timestamp (FIT epoch)
-                point_time = activity.start_time + timedelta(seconds=i * time_interval)
-                record.timestamp = int(point_time.timestamp()) - FIT_EPOCH_OFFSET
+                # fit-tool expects Unix milliseconds for all timestamps
+                if "time" in gps_point:
+                    try:
+                        from dateutil.parser import parse as _parse_dt
+                        point_ms = int(_parse_dt(gps_point["time"]).timestamp() * 1000)
+                    except Exception:
+                        point_time = activity.start_time + timedelta(seconds=i * time_interval)
+                        point_ms = int(point_time.timestamp() * 1000)
+                else:
+                    point_time = activity.start_time + timedelta(seconds=i * time_interval)
+                    point_ms = int(point_time.timestamp() * 1000)
+                record.timestamp = point_ms
 
                 # Position — FIT uses semicircles: degrees * (2^31 / 180)
                 if "latitude" in gps_point and "longitude" in gps_point:
@@ -694,7 +706,7 @@ class DataConverter:
                 if "heart_rate" in gps_point:
                     record.heart_rate = gps_point["heart_rate"]
 
-                builder.add_message(record)
+                builder.add(record)
 
         except Exception as e:
             logger.warning(f"Error adding FIT trackpoints: {e}")
@@ -715,9 +727,9 @@ class DataConverter:
             for i in range(num_records):
                 record = RecordMessage()
 
-                # Timestamp (FIT epoch)
+                # fit-tool expects Unix milliseconds
                 point_time = activity.start_time + timedelta(seconds=i * time_interval)
-                record.timestamp = int(point_time.timestamp()) - FIT_EPOCH_OFFSET
+                record.timestamp = int(point_time.timestamp() * 1000)
 
                 # Distance (if available, spread over time)
                 if activity.distance:
@@ -735,7 +747,7 @@ class DataConverter:
                         (activity.steps / 2) / (duration_seconds / 60)
                     )  # Steps per minute / 2
 
-                builder.add_message(record)
+                builder.add(record)
 
         except Exception as e:
             logger.warning(f"Error adding FIT time records: {e}")
