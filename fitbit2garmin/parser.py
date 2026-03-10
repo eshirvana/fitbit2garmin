@@ -332,6 +332,11 @@ class FitbitParser:
                 print(f"  📁 Processing activities from: {activity_path.name}")
                 activities.extend(self._parse_activities_from_path(activity_path))
 
+        # GPS data in Fitbit Google Takeout lives in separate .tcx files inside
+        # the Activities/ directory — not embedded in the exercise JSON files.
+        # Attach GPS trackpoints to matching activities now.
+        self._attach_gps_from_tcx_files(activities)
+
         logger.info(f"Parsed {len(activities)} activities")
         return activities
 
@@ -1758,3 +1763,179 @@ class FitbitParser:
         r = 6371000
 
         return c * r
+
+    def _parse_tcx_gps_points(self, tcx_path: Path):
+        """Parse GPS trackpoints and activity start time from a Fitbit TCX file.
+
+        Returns (gps_points, start_time_str).  gps_points is a list of dicts
+        with keys latitude, longitude, altitude, distance, time, heart_rate.
+        """
+        import xml.etree.ElementTree as ET
+
+        TCX_NS = "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"
+
+        def _find(elem, tag):
+            """Try namespaced then bare tag lookup.
+            NOTE: must use 'is not None' — leaf Elements are falsy in Python.
+            """
+            result = elem.find(f"{{{TCX_NS}}}{tag}")
+            if result is None:
+                result = elem.find(tag)
+            return result
+
+        try:
+            tree = ET.parse(tcx_path)
+            root = tree.getroot()
+
+            # Get the activity start time from <Id> element.
+            # Must check 'is not None' because a childless Element is falsy.
+            start_time_str = None
+            id_elem = root.find(f".//{{{TCX_NS}}}Id")
+            if id_elem is None:
+                id_elem = root.find(".//Id")
+            if id_elem is not None and id_elem.text:
+                start_time_str = id_elem.text.strip()
+
+            gps_points = []
+            # Walk all Trackpoints across all laps
+            trackpoints = root.findall(f".//{{{TCX_NS}}}Trackpoint")
+            if not trackpoints:
+                trackpoints = root.findall(".//Trackpoint")
+
+            for tp in trackpoints:
+                point = {}
+
+                # Time
+                time_elem = _find(tp, "Time")
+                if time_elem is not None and time_elem.text:
+                    point["time"] = time_elem.text.strip()
+
+                # Position (required for GPS)
+                pos_elem = _find(tp, "Position")
+                if pos_elem is not None:
+                    lat_elem = _find(pos_elem, "LatitudeDegrees")
+                    lon_elem = _find(pos_elem, "LongitudeDegrees")
+                    try:
+                        if lat_elem is not None and lon_elem is not None:
+                            point["latitude"] = float(lat_elem.text)
+                            point["longitude"] = float(lon_elem.text)
+                    except (ValueError, TypeError):
+                        pass
+
+                if "latitude" not in point or "longitude" not in point:
+                    continue  # Skip points without coordinates
+
+                # Altitude
+                alt_elem = _find(tp, "AltitudeMeters")
+                if alt_elem is not None and alt_elem.text:
+                    try:
+                        point["altitude"] = float(alt_elem.text)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Cumulative distance
+                dist_elem = _find(tp, "DistanceMeters")
+                if dist_elem is not None and dist_elem.text:
+                    try:
+                        point["distance"] = float(dist_elem.text)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Heart rate — nested element, find with explicit path
+                hr_val = tp.find(f".//{{{TCX_NS}}}HeartRateBpm/{{{TCX_NS}}}Value")
+                if hr_val is None:
+                    hr_val = tp.find(".//HeartRateBpm/Value")
+                if hr_val is not None and hr_val.text:
+                    try:
+                        point["heart_rate"] = int(hr_val.text)
+                    except (ValueError, TypeError):
+                        pass
+
+                gps_points.append(point)
+
+            return (gps_points if gps_points else None), start_time_str
+
+        except Exception as e:
+            logger.warning(f"Error parsing TCX file {tcx_path}: {e}")
+            return None, None
+
+    def _attach_gps_from_tcx_files(self, activities: List[ActivityData]) -> None:
+        """Match Fitbit TCX files from the Activities directory to parsed activities
+        and attach GPS trackpoints to each matching activity.
+
+        Fitbit stores GPS data in separate .tcx files rather than embedding it in
+        the exercise JSON files.  Matching is attempted in two ways:
+          1. If the TCX filename stem is purely numeric it is treated as a logId.
+          2. Otherwise the TCX file is parsed for its <Id> start-time and matched
+             against activity start times (within a 60-second tolerance).
+        """
+        if "activities" not in self.data_directories:
+            return
+
+        tcx_dir = self.data_directories["activities"]
+        if not tcx_dir.exists():
+            return
+
+        tcx_files = list(tcx_dir.glob("**/*.tcx"))
+        if not tcx_files:
+            return
+
+        print(f"  📍 Found {len(tcx_files)} TCX file(s) with potential GPS data")
+
+        # Build lookup maps (only for activities that don't already have GPS)
+        log_id_map: Dict[int, ActivityData] = {
+            a.log_id: a for a in activities if a.log_id and not a.gps_data
+        }
+        start_ts_map: Dict[int, ActivityData] = {
+            int(a.start_time.timestamp()): a
+            for a in activities
+            if not a.gps_data
+        }
+
+        attached = 0
+        for tcx_file in tcx_files:
+            try:
+                activity = None
+                gps_points = None
+                start_time_str = None
+
+                # Strategy 1: filename is the logId (e.g. "12345678.tcx")
+                stem = tcx_file.stem
+                if stem.lstrip("-").isdigit():
+                    activity = log_id_map.get(int(stem))
+
+                # Strategy 2: parse the TCX and match by start time
+                if not activity:
+                    gps_points, start_time_str = self._parse_tcx_gps_points(tcx_file)
+                    if start_time_str:
+                        try:
+                            tcx_ts = int(parse_datetime(start_time_str).timestamp())
+                            # Allow ±60 s tolerance for clock/timezone drift
+                            for offset in range(-60, 61):
+                                activity = start_ts_map.get(tcx_ts + offset)
+                                if activity:
+                                    break
+                        except Exception:
+                            pass
+
+                if not activity:
+                    continue
+
+                # Parse GPS points if strategy 1 was used (not yet parsed)
+                if gps_points is None:
+                    gps_points, _ = self._parse_tcx_gps_points(tcx_file)
+
+                if gps_points:
+                    activity.gps_data = gps_points
+                    activity.has_gps = True
+                    attached += 1
+                    logger.debug(
+                        f"Attached {len(gps_points)} GPS points to activity "
+                        f"{activity.log_id} from {tcx_file.name}"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Error attaching GPS from {tcx_file.name}: {e}")
+
+        if attached:
+            print(f"  ✅ Attached GPS data to {attached} activities from TCX files")
