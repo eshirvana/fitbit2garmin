@@ -6,12 +6,12 @@ A comprehensive Python tool for converting Fitbit Google Takeout data to Garmin 
 
 - **Comprehensive Data Support**: Converts 15+ data types from Fitbit including activities, sleep, heart rate, body composition, and daily metrics
 - **Multiple Export Formats**: Supports CSV, TCX, GPX, and FIT formats
+- **Correct Sport Type Mapping**: 30+ activity types mapped to the right Garmin sport in FIT files (Tennis, Basketball, Soccer, Golf, Rowing, Boxing, and more)
+- **GPS Data Extraction**: Reads GPS tracks from Fitbit's `Activities/*.tcx` files and embeds them in exported TCX/GPX/FIT files
 - **Advanced Heart Rate Zone Analysis**: Age-based zone calculations with Garmin compatibility
-- **Smart Data Enhancement**: GPS processing with speed/elevation calculation
 - **Batch Processing**: Handles years of historical data efficiently with parallel processing
-- **Data Validation**: Ensures integrity throughout the conversion process
-- **Garmin Integration**: Generates files ready for Garmin Connect import
-- **Command Line Interface**: Easy-to-use CLI with progress tracking and resume capability
+- **Resume Capability**: Skip already-processed files on interrupted conversions
+- **Command Line Interface**: Easy-to-use CLI with progress tracking
 
 ## Supported Data Types
 
@@ -22,7 +22,7 @@ A comprehensive Python tool for converting Fitbit Google Takeout data to Garmin 
 - **Body Composition**: Weight, BMI, body fat percentage (CSV export)
 - **Sleep Data**: Duration, stages, sleep score, REM/deep sleep analysis (CSV export)
 - **Heart Rate**: Continuous HR, resting HR, zone analysis (CSV export)
-- **GPS Data**: Enhanced processing with speed calculation and elevation
+- **GPS Data**: Extracted from Fitbit's `Activities/` TCX files with speed and elevation
 
 ### ⚠️ Partially Supported
 - **Heart Rate Variability**: Sleep HRV data
@@ -31,31 +31,43 @@ A comprehensive Python tool for converting Fitbit Google Takeout data to Garmin 
 - **Temperature Data**: Skin temperature variations
 - **SpO2 Data**: Blood oxygen levels
 
-## Advanced Data Processing
+## Activity Type Mapping
 
-### GPS Enhancement
-- **Speed calculation**: Uses Haversine formula for GPS points without speed data
-- **Elevation processing**: Maintains altitude information from GPS tracks
-- **Timestamp handling**: Properly formats time data for different export formats
-- **Data validation**: Ensures GPS coordinate accuracy and completeness
+The tool maps 30+ Fitbit activity types to Garmin sport categories. **FIT files carry the full, correct sport type** — TCX files are limited to Running, Walking, Biking, Swimming, and Other by the TCX schema.
 
-### Sleep Analysis
-- **Sleep stage detection**: Identifies REM, light, deep, and wake periods
-- **Sleep quality metrics**: Calculates efficiency, duration, and sleep score
-- **Biometric integration**: Includes heart rate and breathing data during sleep
-- **Multi-format support**: Handles both JSON and CSV sleep data sources
+| Fitbit Activity | Garmin Sport (FIT) | TCX Sport |
+|---|---|---|
+| Running | Running | Running |
+| Walking | Walking | Walking |
+| Biking | Cycling - Road | Biking |
+| Indoor Cycling | Cycling - Indoor | Biking |
+| Hiking | Hiking | Walking |
+| Swimming | Swimming - Lap | Swimming |
+| Treadmill | Running - Treadmill | Running |
+| Tennis | **Tennis** | Other ⚠️ |
+| Basketball | **Basketball** | Other ⚠️ |
+| Soccer | **Soccer** | Other ⚠️ |
+| Golf | **Golf** | Other ⚠️ |
+| Rowing | **Rowing** | Other ⚠️ |
+| Boxing | **Boxing** | Other ⚠️ |
+| Rock Climbing | **Rock Climbing** | Other ⚠️ |
+| Yoga | Training - Yoga | Other |
+| Pilates | Training - Pilates | Other |
+| Weights / Abs | Training - Strength | Other |
+| HIIT / Aerobic | Training - Cardio | Other |
+| Elliptical | Elliptical | Other |
+| Stair Climbing | Stair Climbing | Other |
+| Alpine Skiing | Alpine Skiing | Other ⚠️ |
+| Snowboarding | Snowboarding | Other ⚠️ |
 
-### Activity Recognition
-- **27+ activity types**: Comprehensive mapping from Fitbit to Garmin activities
-- **Smart classification**: Uses both activity names and Fitbit type IDs
-- **Fallback mapping**: Handles unknown activities gracefully
-- **Debug tools**: Provides detailed analysis of activity type detection
+> ⚠️ **These sports require FIT format** to appear with the correct sport type in Garmin Connect. Import `.fit` files, not `.tcx`, for these activities.
+
+The `debug-activities` command shows both TCX and FIT sport for every activity in your dataset.
 
 ## Installation
 
 ### Requirements
 - Python 3.9 or higher
-- pip (Python package installer)
 
 ### Install Dependencies
 ```bash
@@ -112,6 +124,8 @@ fitbit2garmin analyze path/to/Takeout
 fitbit2garmin debug-activities path/to/Takeout
 ```
 
+Shows TCX sport and FIT sport side-by-side for every activity type detected in your data, flagging any that need FIT format for correct sport display.
+
 ### 5. Get Help
 ```bash
 fitbit2garmin --help
@@ -133,29 +147,28 @@ fitbit2garmin info
 - `garmin_connect_import.csv` - Combined file for Garmin Connect import
 
 ### Activity Files
-- `activity_*.tcx` - Individual activities in TCX format with heart rate zones
-- `activity_*.gpx` - GPS activities in GPX format
-- `activity_*.fit` - Native Garmin FIT format (recommended for best compatibility)
+- `{type}_{logid}_{timestamp}.tcx` - Individual activities in TCX format
+- `activity_{logid}_{timestamp}.gpx` - GPS activities in GPX format
+- `{type}_{logid}_{timestamp}.fit` - Native Garmin FIT format (**recommended**)
 
 ## Importing to Garmin Connect
 
 ### Method 1: Manual Upload (Recommended)
 1. Log into [Garmin Connect](https://connect.garmin.com/)
 2. Go to "Import Data" in the menu
-3. Upload CSV files for daily metrics
-4. Upload FIT files for individual activities (recommended for best compatibility)
-5. Upload TCX/GPX files as alternatives if FIT files don't work
+3. Upload **FIT files** for individual activities — these carry the correct sport type for all activities
+4. Upload CSV files for daily metrics
+5. Upload TCX/GPX files only as fallback if FIT files have issues
 
 ### Method 2: Bulk Import
 1. Use the generated `garmin_connect_import.csv` file
 2. Upload via Garmin Connect's bulk import feature
-3. Note: May have limitations on data types
 
 ### Recommended Upload Order
-1. **FIT files first**: Best compatibility with heart rate zones and sensor data
-2. **TCX files**: Good for activities with heart rate and GPS data
-3. **GPX files**: GPS tracks only, use as last resort
-4. **CSV files**: Daily metrics and summaries
+1. **FIT files first** — correct sport types, best compatibility, smallest size
+2. **TCX files** — useful when FIT is unavailable; sport is limited to Running/Walking/Biking/Swimming/Other
+3. **GPX files** — GPS tracks only
+4. **CSV files** — daily metrics and summaries
 
 ## Advanced Heart Rate Zone Features
 
@@ -170,26 +183,22 @@ fitbit2garmin info
 - **5-Zone System**: Traditional zones (Recovery, Aerobic, Tempo, Threshold, Anaerobic)
 - **Fitbit Mapping**: Converts Fitbit's 3-zone system to Garmin's 5-zone system
 
-### Export Enhancements
-- **FIT files**: Native Garmin format with zone time distribution
-- **TCX files**: Heart rate zone extensions for Garmin Connect
-- **CSV analysis**: Detailed zone breakdown with percentages and calculations
-
 ## Data Quality and Limitations
 
 ### What Transfers Well
 - ✅ Daily step counts and distance
 - ✅ Sleep duration, efficiency, and sleep stages (REM, light, deep)
 - ✅ Body weight and composition
-- ✅ Activity GPS tracks with enhanced speed and elevation
+- ✅ Activity GPS tracks (extracted from Fitbit's `Activities/` directory)
 - ✅ Exercise summaries and calories
 - ✅ Heart rate zones with age-based recalculation
-- ✅ Comprehensive heart rate analysis (avg, max, min, resting)
-- ✅ 25+ activity types with proper Garmin mapping
+- ✅ 30+ activity types with correct Garmin FIT sport mapping
+- ✅ Distance unit normalization (miles → km for US accounts)
 
 ### Known Limitations
+- ⚠️ TCX format only supports Running/Walking/Biking/Swimming/Other — import `.fit` files for Tennis, Basketball, Soccer, etc.
 - ⚠️ Heart rate variability data is limited to sleep periods
-- ⚠️ Stress data may not be fully compatible
+- ⚠️ Stress data may not be fully compatible with Garmin Connect
 - ⚠️ Some Fitbit-specific metrics don't have Garmin equivalents
 - ⚠️ Time zones may need manual adjustment
 - ⚠️ Historical heart rate zones use estimated max HR (unless actual max HR is recorded)
@@ -200,7 +209,7 @@ fitbit2garmin info
 
 **"Fitbit data not found"**
 - Ensure you've extracted the Google Takeout archive
-- Check that the path contains `Takeout/Fitbit/` directory
+- Check that the path contains a `Fitbit/` directory inside the Takeout folder
 
 **"No data found to convert"**
 - Verify your Fitbit account had data in the export period
@@ -212,8 +221,19 @@ fitbit2garmin info
 - Ensure date formats match your Garmin Connect region settings
 
 **"Activities show as 'Other' in Garmin Connect"**
-- Use `fitbit2garmin debug-activities` to analyze activity type mapping
-- Check if your activities have recognizable Fitbit activity type IDs
+- This is a TCX format limitation — TCX only supports Running, Walking, Biking, Swimming, and Other
+- **Solution**: Import the `.fit` files instead of `.tcx` files — FIT carries the correct sport type for all 30+ activity types (Tennis, Basketball, Soccer, Golf, Rowing, Boxing, etc.)
+- Run `fitbit2garmin debug-activities path/to/Takeout` to see which activities need FIT format
+- The convert command also prints a summary of activities that require FIT format
+
+**"GPS data missing from activities"**
+- GPS is stored by Fitbit in separate `.tcx` files under `Activities/` in your Takeout export
+- The tool automatically matches and extracts GPS from these files
+- If an activity still lacks GPS, the original Fitbit recording may not have had GPS enabled
+
+**"Distance looks wrong"**
+- Fitbit exports distance in the account's locale unit (miles for US accounts, km for others)
+- The tool automatically detects the unit and normalizes to km
 
 **"Heart rate zones seem incorrect"**
 - Review the `fitbit_heart_rate_zones.csv` file for zone calculations
@@ -221,29 +241,23 @@ fitbit2garmin info
 - Consider manually setting heart rate zones in Garmin Connect if needed
 
 ### Getting Help
-- Check the `--verbose` flag for detailed logging
+- Use `--verbose` for detailed logging
 - Use `fitbit2garmin analyze` to inspect your data
 - Use `fitbit2garmin debug-activities` to debug activity type issues
-- Review the generated files before uploading
 
 ## Development
 
 ### Project Structure
 ```
 fitbit2garmin/
-├── models.py          # Data models using Pydantic
-├── parser.py          # Fitbit JSON data parser with heart rate zone enhancement
-├── converter.py       # Data format converters (TCX, GPX, FIT)
-├── exporter.py        # CSV and file exporters
-├── heart_rate_zones.py # Advanced heart rate zone calculations
-├── cli.py            # Command-line interface
-├── utils.py          # Utility functions and parallel processing
-└── __init__.py       # Package initialization
-```
-
-### Running Tests
-```bash
-python -m pytest tests/
+├── models.py             # Pydantic data models and enums
+├── parser.py             # Fitbit JSON parser; GPS extraction from Activities/ TCX files
+├── converter.py          # TCX, GPX, and FIT file generation
+├── exporter.py           # CSV exporters (Pandas-based)
+├── heart_rate_zones.py   # Heart rate zone calculations (Tanaka, Fox, Gellish, Nes)
+├── cli.py                # Click CLI commands
+├── utils.py              # Parallel processing and resume manager
+└── __init__.py           # Package initialization
 ```
 
 ### Code Style
@@ -257,9 +271,7 @@ flake8 fitbit2garmin/
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
-
+4. Submit a pull request
 
 ## Acknowledgments
 

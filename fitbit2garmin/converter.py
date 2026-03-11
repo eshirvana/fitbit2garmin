@@ -150,11 +150,16 @@ class DataConverter:
                 self._add_time_trackpoints(track_elem, activity)
 
             # Notes element must come after all Lap elements per TCX schema
+            garmin_sport = self._garmin_sport_name(activity.activity_type)
             notes_parts = [
                 f"Fitbit Activity: {activity.activity_name}",
-                f"Activity Type: {activity.activity_type.value}",
+                f"Garmin Sport: {garmin_sport}",
                 f"Log ID: {activity.log_id}",
             ]
+            # Warn when TCX must show "Other" but FIT has a proper sport type
+            tcx_sport = self._map_activity_type_to_tcx(activity.activity_type)
+            if tcx_sport == "Other" and garmin_sport != "Generic":
+                notes_parts.append("NOTE: Import .fit file to get correct sport type in Garmin Connect")
             if activity.activity_type_id:
                 notes_parts.append(f"Fitbit Type ID: {activity.activity_type_id}")
             if (
@@ -335,10 +340,9 @@ class DataConverter:
 
     def _map_activity_type_to_tcx(self, activity_type) -> str:
         """Map our activity type to TCX sport type with comprehensive Garmin Connect compatibility."""
-        # Comprehensive mapping based on official Garmin TCX schema and Connect import behavior
-        # These are the sport types that Garmin Connect recognizes and properly categorizes
         # TCX schema only officially supports Running, Biking, Other;
         # Garmin Connect also accepts Walking and Swimming in practice.
+        # All other sports must be "Other" in TCX — use FIT files for correct sport types.
         mapping = {
             "running": "Running",
             "walking": "Walking",
@@ -375,10 +379,46 @@ class DataConverter:
             "other": "Other",
         }
 
-        # Get the mapped sport type
-        sport_type = mapping.get(activity_type.value, "Other")
+        return mapping.get(activity_type.value, "Other")
 
-        return sport_type
+    def _garmin_sport_name(self, activity_type) -> str:
+        """Return a human-readable Garmin sport name for the given activity type."""
+        mapping = {
+            "running": "Running",
+            "walking": "Walking",
+            "biking": "Cycling - Road",
+            "indoor_cycling": "Cycling - Indoor",
+            "hiking": "Hiking",
+            "swimming": "Swimming - Lap",
+            "treadmill": "Running - Treadmill",
+            "elliptical": "Elliptical",
+            "rowing": "Rowing",
+            "workout": "Training - Cardio",
+            "yoga": "Training - Yoga",
+            "pilates": "Training - Pilates",
+            "weights": "Training - Strength",
+            "abs": "Training - Strength",
+            "crossfit": "Training - Strength",
+            "hiit": "Training - Cardio",
+            "aerobic": "Training - Cardio",
+            "dance": "Training - Cardio",
+            "martial_arts": "Training - Cardio",
+            "boxing": "Boxing",
+            "climbing": "Rock Climbing",
+            "stair_climbing": "Stair Climbing",
+            "paddle_sports": "Paddling",
+            "tennis": "Tennis",
+            "basketball": "Basketball",
+            "soccer": "Soccer",
+            "football": "American Football",
+            "volleyball": "Volleyball",
+            "golf": "Golf",
+            "skiing": "Alpine Skiing",
+            "snowboarding": "Snowboarding",
+            "sport": "Generic Sport",
+            "other": "Generic",
+        }
+        return mapping.get(activity_type.value, "Generic")
 
     def convert_activities_to_fit(self, activities: List[ActivityData]) -> List[str]:
         """Convert activities to FIT format using fit-tool library."""

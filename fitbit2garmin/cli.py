@@ -236,6 +236,32 @@ def convert(
         else:
             click.echo(f"📄 {len(exported_files)} files generated (too many to list)")
 
+        # Show FIT vs TCX guidance for sport-specific activities
+        if user_data.activities:
+            from .converter import DataConverter as _DC
+            _conv = _DC("/tmp")
+            fit_only = [
+                a for a in user_data.activities
+                if _conv._map_activity_type_to_tcx(a.activity_type) == "Other"
+                and _conv._garmin_sport_name(a.activity_type) != "Generic"
+            ]
+            if fit_only:
+                sport_counts: dict = {}
+                for a in fit_only:
+                    label = f"{a.activity_type.value} → {_conv._garmin_sport_name(a.activity_type)}"
+                    sport_counts[label] = sport_counts.get(label, 0) + 1
+                click.echo(
+                    f"\n⚠️  {len(fit_only)} activities need FIT format for correct sport type in Garmin Connect:"
+                )
+                for label, cnt in sorted(sport_counts.items()):
+                    click.echo(f"   • {label}  ({cnt} activities)")
+                click.echo(
+                    "   TCX format only supports Running/Walking/Biking/Swimming/Other."
+                )
+                click.echo(
+                    "   Import the .fit files (not .tcx) for these activities."
+                )
+
         # Instructions
         click.echo("\n🎯 Next steps:")
         click.echo(
@@ -244,7 +270,7 @@ def convert(
         click.echo(
             "2. For activities: Upload FIT files (recommended), TCX, or GPX files to Garmin Connect"
         )
-        click.echo("3. FIT files provide the best compatibility and smallest file size")
+        click.echo("3. FIT files provide the best compatibility and correct sport types")
         click.echo(
             "4. Check the garmin_connect_import.csv file for bulk import compatibility"
         )
@@ -395,8 +421,25 @@ def debug_activities(takeout_path):
         )
         click.echo("=" * 60)
 
+        from .converter import DataConverter
+        converter = DataConverter("/tmp")
+
+        # Track activities where TCX shows "Other" but FIT has a proper sport
+        fit_only_sports = []
+
         for activity_type, activities in sorted(type_groups.items()):
-            click.echo(f"\n🏷️  {activity_type.upper()} ({len(activities)} activities):")
+            # Determine TCX and FIT sport for this type
+            sample = activities[0]
+            tcx_sport = converter._map_activity_type_to_tcx(sample.activity_type)
+            fit_sport = converter._garmin_sport_name(sample.activity_type)
+            needs_fit = tcx_sport == "Other" and fit_sport != "Generic"
+
+            sport_label = f"TCX={tcx_sport}  |  FIT={fit_sport}"
+            flag = "  ⚠️  use .fit file" if needs_fit else ""
+            click.echo(f"\n🏷️  {activity_type.upper()} ({len(activities)} activities)  [{sport_label}]{flag}:")
+
+            if needs_fit:
+                fit_only_sports.append((activity_type, fit_sport, len(activities)))
 
             # Show examples with full details
             for i, activity in enumerate(activities[:5]):
@@ -406,21 +449,33 @@ def debug_activities(takeout_path):
                     else " [No ID]"
                 )
                 click.echo(f"   {i+1}. {activity.activity_name}{type_id_str}")
-                click.echo(f"      Original: {activity.original_activity_name}")
-                from .converter import DataConverter
-
-                converter = DataConverter("/tmp")
-                click.echo(
-                    f"      TCX Sport: {converter._map_activity_type_to_tcx(activity.activity_type)}"
-                )
+                if activity.original_activity_name and activity.original_activity_name != activity.activity_name:
+                    click.echo(f"      Original: {activity.original_activity_name}")
 
             if len(activities) > 5:
                 click.echo(f"   ... and {len(activities) - 5} more")
 
         click.echo(f"\n🎯 Recommendations:")
+
+        if fit_only_sports:
+            click.echo(
+                f"\n⚠️  {len(fit_only_sports)} activity type(s) require FIT format for correct sport in Garmin Connect:"
+            )
+            click.echo(
+                "   TCX format only supports Running/Walking/Biking/Swimming/Other."
+            )
+            click.echo(
+                "   The following sports appear as 'Other' in TCX but are correct in .fit files:"
+            )
+            for act_type, garmin_sport, count in sorted(fit_only_sports):
+                click.echo(f"   • {act_type} → {garmin_sport}  ({count} activities)")
+            click.echo(
+                "\n   ACTION: Import the .fit files (not .tcx) to Garmin Connect for these activities."
+            )
+
         if "other" in type_groups:
             click.echo(
-                f"• {len(type_groups['other'])} activities mapped to 'other' - these will appear as 'Other' in Garmin Connect"
+                f"\n• {len(type_groups['other'])} activities mapped to 'other' - these will appear as 'Other' in Garmin Connect"
             )
 
         # Check for common unmapped activity type IDs
