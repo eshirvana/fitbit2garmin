@@ -23,14 +23,94 @@ logger = logging.getLogger(__name__)
 class DataConverter:
     """Convert Fitbit data to Garmin-compatible formats."""
 
-    def __init__(self, output_dir: Union[str, Path]):
-        """Initialize converter with output directory."""
+    def __init__(self, output_dir: Union[str, Path], hr_data_dir: Optional[Union[str, Path]] = None):
+        """Initialize converter with output directory and optional HR data directory."""
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.hr_data_dir = Path(hr_data_dir) if hr_data_dir else None
+        # Cache loaded HR data by date string to avoid re-reading the same file
+        self._hr_cache: Dict[str, List] = {}
 
         logger.info(
             f"Initialized data converter with output directory: {self.output_dir}"
         )
+        if self.hr_data_dir:
+            logger.info(f"HR data directory: {self.hr_data_dir}")
+
+    def _load_day_hr_data(self, date_str: str) -> List:
+        """Load HR readings for a specific date from Fitbit's heart_rate-YYYY-MM-DD.json.
+
+        Returns a list of (unix_ms, bpm) tuples sorted by timestamp.
+        Results are cached by date to avoid re-reading the same file for
+        multiple activities on the same day.
+        """
+        if date_str in self._hr_cache:
+            return self._hr_cache[date_str]
+
+        if not self.hr_data_dir or not self.hr_data_dir.exists():
+            self._hr_cache[date_str] = []
+            return []
+
+        # Try the canonical file name first, then glob for variants
+        candidate = self.hr_data_dir / f"heart_rate-{date_str}.json"
+        if not candidate.exists():
+            matches = sorted(self.hr_data_dir.glob(f"heart_rate-{date_str}*.json"))
+            if not matches:
+                self._hr_cache[date_str] = []
+                return []
+            candidate = matches[0]
+
+        readings = []
+        try:
+            try:
+                import orjson
+                with open(candidate, "rb") as f:
+                    data = orjson.loads(f.read())
+            except Exception:
+                import json as _json
+                with open(candidate, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+
+            for record in data:
+                if not isinstance(record, dict):
+                    continue
+                dt_str = record.get("dateTime", "")
+                value = record.get("value", {})
+                bpm = value.get("bpm", 0) if isinstance(value, dict) else 0
+                if not dt_str or not bpm:
+                    continue
+                try:
+                    # Fitbit HR format: "03/10/22 16:44:00"
+                    dt = datetime.strptime(dt_str, "%m/%d/%y %H:%M:%S")
+                    readings.append((int(dt.timestamp() * 1000), int(bpm)))
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Could not load HR data for {date_str}: {e}")
+
+        readings.sort(key=lambda x: x[0])
+        self._hr_cache[date_str] = readings
+        return readings
+
+    def _get_activity_hr_data(self, activity: ActivityData) -> List:
+        """Return HR readings within the activity's time window.
+
+        Returns sorted list of (unix_ms, bpm) tuples.
+        """
+        start_ms = int(activity.start_time.timestamp() * 1000)
+        end_ms = start_ms + activity.duration_ms
+
+        date_str = activity.start_time.strftime("%Y-%m-%d")
+        readings = list(self._load_day_hr_data(date_str))
+
+        # If activity crosses midnight load the next day too
+        from datetime import timedelta
+        end_dt = activity.start_time + timedelta(milliseconds=activity.duration_ms)
+        end_date_str = end_dt.strftime("%Y-%m-%d")
+        if end_date_str != date_str:
+            readings = readings + list(self._load_day_hr_data(end_date_str))
+
+        return [(ts, bpm) for ts, bpm in readings if start_ms <= ts <= end_ms]
 
     def convert_activities_to_tcx(self, activities: List[ActivityData]) -> List[str]:
         """Convert activities to TCX format."""
@@ -573,6 +653,7 @@ class DataConverter:
             start_evt.timestamp = start_ms
             start_evt.event = Event.TIMER
             start_evt.event_type = EventType.START
+            start_evt.data = 0
             builder.add(start_evt)
 
             # ── Pre-compute GPS stats (used by both Session and Lap) ──────────
@@ -618,6 +699,7 @@ class DataConverter:
             stop_evt.timestamp = end_ms
             stop_evt.event = Event.TIMER
             stop_evt.event_type = EventType.STOP_ALL
+            stop_evt.data = 0
             builder.add(stop_evt)
 
             # ── Lap ──────────────────────────────────────────────────────────
@@ -649,6 +731,19 @@ class DataConverter:
             if zone_times:
                 lap.time_in_hr_zone = zone_times
             self._apply_gps_stats_to_message(lap, gps_stats, avg_speed_ms)
+            # Add GPS start/end positions to lap
+            if gps_stats.get("start_lat") is not None:
+                lap.start_position_lat = gps_stats["start_lat"]
+                lap.start_position_long = gps_stats["start_lon"]
+            if has_gps and activity.gps_data:
+                last_pt = next(
+                    (p for p in reversed(activity.gps_data)
+                     if isinstance(p, dict) and "latitude" in p and "longitude" in p),
+                    None,
+                )
+                if last_pt:
+                    lap.end_position_lat = last_pt["latitude"]
+                    lap.end_position_long = last_pt["longitude"]
             builder.add(lap)
 
             # ── Session ──────────────────────────────────────────────────────
@@ -692,9 +787,12 @@ class DataConverter:
             activity_msg = ActivityMessage()
             activity_msg.timestamp = end_ms
             activity_msg.num_sessions = 1
-            activity_msg.type = 0        # Manual
-            activity_msg.event = 26      # Activity
-            activity_msg.local_timestamp = end_ms // 1000  # Unix seconds
+            activity_msg.total_timer_time = timer_time
+            activity_msg.type = 0              # Manual
+            activity_msg.event = Event.ACTIVITY
+            activity_msg.event_type = EventType.STOP
+            # local_timestamp must be Unix seconds (fit-tool does not auto-convert this field)
+            activity_msg.local_timestamp = end_ms // 1000
             builder.add(activity_msg)
 
             # ── Write file ───────────────────────────────────────────────────
@@ -766,13 +864,27 @@ class DataConverter:
             return (0, 0)  # Generic sport/subsport
 
     def _add_fit_trackpoints(self, builder, activity: ActivityData):
-        """Add GPS trackpoints to FIT file."""
+        """Add GPS trackpoints to FIT file, enriched with intraday HR when available."""
         try:
             from fit_tool.profile.messages.record_message import RecordMessage
             from datetime import timedelta
 
             if not activity.gps_data:
                 return
+
+            # Pre-load intraday HR data for this activity (keyed by unix_ms)
+            intraday_hr = self._get_activity_hr_data(activity)
+            # Build a lookup: for each GPS point, find the nearest HR reading within ±30s
+            hr_lookup: Dict[int, int] = {ts: bpm for ts, bpm in intraday_hr}
+
+            def _nearest_hr(point_ms: int) -> Optional[int]:
+                """Find the nearest intraday HR reading within ±30 000 ms."""
+                if not hr_lookup:
+                    return None
+                best_ts = min(hr_lookup, key=lambda t: abs(t - point_ms))
+                if abs(best_ts - point_ms) <= 30000:
+                    return hr_lookup[best_ts]
+                return None
 
             # Calculate time intervals between points
             duration_seconds = activity.duration_ms / 1000
@@ -837,9 +949,13 @@ class DataConverter:
                 if "speed" in gps_point:
                     record.speed = gps_point["speed"]
 
-                # Only use actual recorded heart rate — never fabricate values
+                # Heart rate: prefer embedded GPS point HR, then intraday HR lookup
                 if "heart_rate" in gps_point:
                     record.heart_rate = gps_point["heart_rate"]
+                else:
+                    intraday_bpm = _nearest_hr(point_ms)
+                    if intraday_bpm:
+                        record.heart_rate = intraday_bpm
 
                 builder.add(record)
 
@@ -847,42 +963,61 @@ class DataConverter:
             logger.warning(f"Error adding FIT trackpoints: {e}")
 
     def _add_fit_time_records(self, builder, activity: ActivityData):
-        """Add time-based records for non-GPS activities."""
+        """Add time-based records for non-GPS activities, using intraday HR when available."""
         try:
             from fit_tool.profile.messages.record_message import RecordMessage
             from datetime import timedelta
 
-            # Create records at regular intervals
             duration_seconds = activity.duration_ms / 1000
-            num_records = min(
-                100, max(10, int(duration_seconds / 60))
-            )  # 1 record per minute, max 100
-            time_interval = duration_seconds / num_records
+            total_distance_m = (activity.distance or 0) * 1000  # km → m
 
-            for i in range(num_records):
-                record = RecordMessage()
+            # Load intraday HR for this activity
+            intraday_hr = self._get_activity_hr_data(activity)
 
-                # fit-tool expects Unix milliseconds
-                point_time = activity.start_time + timedelta(seconds=i * time_interval)
-                record.timestamp = int(point_time.timestamp() * 1000)
+            if intraday_hr:
+                # We have per-second HR data — emit one record per HR sample (≤600 records)
+                # Limit to every 6th sample when very dense (Fitbit records every ~5s)
+                step = max(1, len(intraday_hr) // 600)
+                samples = intraday_hr[::step]
+                start_ms = int(activity.start_time.timestamp() * 1000)
+                end_ms = start_ms + activity.duration_ms
 
-                # Distance (if available, spread over time)
-                if activity.distance:
-                    record.distance = (
-                        activity.distance * 1000 * i
-                    ) / num_records  # Convert km to meters
+                for ts_ms, bpm in samples:
+                    record = RecordMessage()
+                    record.timestamp = ts_ms
+                    record.heart_rate = bpm
 
-                # Only use actual recorded average heart rate — do not fabricate variation
-                if activity.average_heart_rate:
-                    record.heart_rate = activity.average_heart_rate
+                    # Interpolate distance linearly over time
+                    if total_distance_m > 0 and end_ms > start_ms:
+                        frac = (ts_ms - start_ms) / (end_ms - start_ms)
+                        record.distance = max(0.0, min(total_distance_m, frac * total_distance_m))
 
-                # Steps (for walking/running activities)
-                if activity.steps:
-                    record.cadence = int(
-                        (activity.steps / 2) / (duration_seconds / 60)
-                    )  # Steps per minute / 2
+                    builder.add(record)
+            else:
+                # No intraday HR available — create one record per minute
+                num_records = min(100, max(10, int(duration_seconds / 60)))
+                time_interval = duration_seconds / num_records
 
-                builder.add(record)
+                for i in range(num_records):
+                    record = RecordMessage()
+                    point_time = activity.start_time + timedelta(seconds=i * time_interval)
+                    record.timestamp = int(point_time.timestamp() * 1000)
+
+                    # Spread distance linearly
+                    if total_distance_m > 0:
+                        record.distance = total_distance_m * i / num_records
+
+                    # Use average HR as a constant fallback
+                    if activity.average_heart_rate:
+                        record.heart_rate = activity.average_heart_rate
+
+                    # Running/walking cadence
+                    if activity.steps:
+                        record.cadence = int(
+                            (activity.steps / 2) / (duration_seconds / 60)
+                        )
+
+                    builder.add(record)
 
         except Exception as e:
             logger.warning(f"Error adding FIT time records: {e}")
@@ -917,6 +1052,18 @@ class DataConverter:
         logger.info(
             f"Starting batch conversion of {len(user_data.activities)} activities"
         )
+
+        # Report what data is available per activity
+        gps_count = sum(1 for a in user_data.activities if a.gps_data)
+        hr_count = sum(1 for a in user_data.activities if a.average_heart_rate)
+        dist_count = sum(1 for a in user_data.activities if a.distance)
+        print(f"  📊 Activity data availability:")
+        print(f"     • {gps_count}/{len(user_data.activities)} activities have GPS tracks")
+        print(f"     • {hr_count}/{len(user_data.activities)} activities have heart rate")
+        print(f"     • {dist_count}/{len(user_data.activities)} activities have distance")
+        if self.hr_data_dir and self.hr_data_dir.exists():
+            hr_files = list(self.hr_data_dir.glob("heart_rate*.json"))
+            print(f"     • {len(hr_files)} intraday HR files available for detailed HR graphs")
 
         results = {"tcx_files": [], "gpx_files": [], "fit_files": []}
 

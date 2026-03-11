@@ -155,11 +155,19 @@ def convert(
         user_data = parser.parse_all_data()
 
         # Display summary
+        activities_with_gps = sum(1 for a in user_data.activities if a.gps_data)
+        activities_with_hr = sum(1 for a in user_data.activities if a.average_heart_rate)
+        activities_with_dist = sum(1 for a in user_data.activities if a.distance)
         click.echo(f"✅ Data parsed successfully:")
         click.echo(f"   • Activities: {user_data.total_activities}")
+        if user_data.activities:
+            click.echo(f"     - With GPS data: {activities_with_gps}")
+            click.echo(f"     - With heart rate: {activities_with_hr}")
+            click.echo(f"     - With distance: {activities_with_dist}")
+            hr_days = len(user_data.heart_rate_daily_stats)
+            click.echo(f"     - Intraday HR days available: {hr_days}")
         click.echo(f"   • Sleep records: {user_data.total_sleep_records}")
         click.echo(f"   • Daily records: {user_data.total_daily_records}")
-        click.echo(f"   • Heart rate records: {len(user_data.heart_rate_data)}")
         click.echo(f"   • Body composition: {len(user_data.body_composition)}")
         click.echo(f"   • HRV records: {len(user_data.heart_rate_variability)}")
         click.echo(f"   • Active Zone Minutes: {len(user_data.active_zone_minutes)}")
@@ -231,7 +239,11 @@ def convert(
         if any(f in export_formats for f in ["tcx", "gpx", "fit"]) and not daily_only:
             if user_data.activities:
                 click.echo("🏃 Converting activities...")
-                converter = DataConverter(output_path)
+                # Pass the HR data directory so intraday HR can be embedded in FIT files
+                hr_data_dir = None
+                if "global_export" in parser.data_directories:
+                    hr_data_dir = parser.data_directories["global_export"]
+                converter = DataConverter(output_path, hr_data_dir=hr_data_dir)
 
                 activity_result = converter.batch_convert_activities(user_data)
                 exported_files.extend(activity_result.get("tcx_files", []))
