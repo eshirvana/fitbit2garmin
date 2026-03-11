@@ -556,6 +556,7 @@ class DataConverter:
             file_id.type = FileType.ACTIVITY
             file_id.manufacturer = Manufacturer.DEVELOPMENT
             file_id.product = 1
+            file_id.product_name = "Fitbit"
             file_id.time_created = start_ms
             builder.add(file_id)
 
