@@ -135,16 +135,18 @@ fitbit2garmin info
 
 ## Output Files
 
-### CSV Files (Daily Data)
+### CSV Files (Personal Data Archive)
+These files cannot be imported into Garmin Connect — Garmin Connect has no CSV import for daily health metrics. They are useful as a personal archive, for analysis in spreadsheet tools, or as input for third-party scripts.
+
 - `fitbit_steps.csv` - Daily step counts
 - `fitbit_distance.csv` - Daily distance traveled
 - `fitbit_calories.csv` - Daily calories burned
 - `fitbit_sleep.csv` - Sleep duration and quality
 - `fitbit_heart_rate.csv` - Daily heart rate summaries
-- `fitbit_heart_rate_zones.csv` - Detailed heart rate zone analysis per activity
+- `fitbit_heart_rate_zones.csv` - Heart rate zone analysis per activity
 - `fitbit_body_composition.csv` - Weight and body metrics
 - `fitbit_activities.csv` - Activity summaries and metrics
-- `garmin_connect_import.csv` - Combined file for Garmin Connect import
+- `garmin_connect_import.csv` - Combined summary (reference only)
 
 ### Activity Files
 - `{type}_{logid}_{timestamp}.tcx` - Individual activities in TCX format
@@ -153,22 +155,18 @@ fitbit2garmin info
 
 ## Importing to Garmin Connect
 
-### Method 1: Manual Upload (Recommended)
+> **Important**: Garmin Connect only supports importing **activity files** (FIT, TCX, GPX). It has no import mechanism for daily health metrics such as steps, sleep, body weight, or heart rate. Those data points are synced from Garmin devices — there is no way to bulk-import them from CSV files.
+
+### Uploading Activities
 1. Log into [Garmin Connect](https://connect.garmin.com/)
-2. Go to "Import Data" in the menu
-3. Upload **FIT files** for individual activities — these carry the correct sport type for all activities
-4. Upload CSV files for daily metrics
-5. Upload TCX/GPX files only as fallback if FIT files have issues
+2. Go to **Import Data** in the menu (or drag-and-drop on the web app)
+3. Upload **FIT files** — recommended for all activities; carries the correct sport type for all 30+ activity types
+4. If FIT upload fails for a specific activity, try the **TCX** or **GPX** file instead
 
-### Method 2: Bulk Import
-1. Use the generated `garmin_connect_import.csv` file
-2. Upload via Garmin Connect's bulk import feature
-
-### Recommended Upload Order
-1. **FIT files first** — correct sport types, best compatibility, smallest size
-2. **TCX files** — useful when FIT is unavailable; sport is limited to Running/Walking/Biking/Swimming/Other
-3. **GPX files** — GPS tracks only
-4. **CSV files** — daily metrics and summaries
+### Recommended Format Priority
+1. **FIT files** — correct sport types for all activities, intraday HR embedded, GPS bounding box
+2. **TCX files** — fallback; sport limited to Running/Walking/Biking/Swimming/Other
+3. **GPX files** — GPS track only, no HR or distance metadata
 
 ## Advanced Heart Rate Zone Features
 
@@ -185,15 +183,19 @@ fitbit2garmin info
 
 ## Data Quality and Limitations
 
-### What Transfers Well
-- ✅ Daily step counts and distance
-- ✅ Sleep duration, efficiency, and sleep stages (REM, light, deep)
-- ✅ Body weight and composition
+### What Transfers to Garmin Connect (via FIT/TCX/GPX upload)
 - ✅ Activity GPS tracks (extracted from Fitbit's `Activities/` directory)
-- ✅ Exercise summaries and calories
+- ✅ Exercise duration, calories, distance
+- ✅ Per-activity heart rate (intraday data embedded in FIT records)
 - ✅ Heart rate zones with age-based recalculation
-- ✅ 30+ activity types with correct Garmin FIT sport mapping
+- ✅ 30+ activity types with correct Garmin sport mapping
 - ✅ Distance unit normalization (miles → km for US accounts)
+
+### What Is Exported as CSV (archive/analysis only — not importable into Garmin Connect)
+- 📁 Daily step counts and distance
+- 📁 Sleep duration, efficiency, and sleep stages (REM, light, deep)
+- 📁 Body weight and composition
+- 📁 Daily heart rate summaries and resting HR
 
 ### Known Limitations
 - ⚠️ TCX format only supports Running/Walking/Biking/Swimming/Other — import `.fit` files for Tennis, Basketball, Soccer, etc.

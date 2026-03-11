@@ -295,14 +295,16 @@ def convert(
         # Instructions
         click.echo("\n🎯 Next steps:")
         click.echo(
-            "1. For daily data: Upload CSV files to Garmin Connect web interface"
+            "1. Upload FIT files to Garmin Connect (Import Data menu or drag-and-drop)"
         )
         click.echo(
-            "2. For activities: Upload FIT files (recommended), TCX, or GPX files to Garmin Connect"
+            "2. FIT files include GPS, heart rate, and correct sport type for all 30+ activity types"
         )
-        click.echo("3. FIT files provide the best compatibility and correct sport types")
         click.echo(
-            "4. Check the garmin_connect_import.csv file for bulk import compatibility"
+            "3. If a FIT file fails to import, try the matching TCX or GPX file as a fallback"
+        )
+        click.echo(
+            "4. CSV files are a personal data archive — Garmin Connect cannot import daily metrics (steps, sleep, HR, weight)"
         )
 
     except FileNotFoundError as e:
