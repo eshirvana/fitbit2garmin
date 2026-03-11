@@ -43,6 +43,7 @@ class FitbitParser:
         enable_resume: bool = True,
         enable_parallel: bool = True,
         max_workers: Optional[int] = None,
+        memory_limit_mb: Optional[int] = None,
     ):
         """Initialize parser with path to extracted Google Takeout data."""
         self.takeout_path = Path(takeout_path)
@@ -74,8 +75,16 @@ class FitbitParser:
         if self.enable_parallel:
             self.parallel_processor = ParallelProcessor(max_workers)
 
-        # Memory management
-        self.memory_limit_mb = 1024  # 1GB memory limit
+        # Memory management — default to 75% of available RAM, min 1 GB.
+        if memory_limit_mb is not None:
+            self.memory_limit_mb = memory_limit_mb
+        else:
+            try:
+                import psutil
+                available_mb = psutil.virtual_memory().available // (1024 * 1024)
+                self.memory_limit_mb = max(1024, int(available_mb * 0.75))
+            except Exception:
+                self.memory_limit_mb = 1024
 
         # Discover all subdirectories
         self.data_directories = self._discover_data_directories()
@@ -216,25 +225,23 @@ class FitbitParser:
         """Parse JSON file efficiently, using streaming for large files."""
         file_size = file_path.stat().st_size
 
-        # Skip extremely large files
-        if file_size > 50 * 1024 * 1024:  # 50MB limit
+        # Skip files that are unreasonably large (500 MB).
+        if file_size > 500 * 1024 * 1024:
             logger.warning(f"Skipping very large file {file_path} ({file_size / (1024*1024):.1f}MB)")
             return []
 
-        # Use streaming parser for files larger than 10MB
+        # Use streaming parser for files larger than 10MB to keep per-file
+        # memory low.  NOTE: do NOT break early — read every item so no data
+        # is silently dropped from large exports.
         if file_size > 10 * 1024 * 1024:  # 10MB
             logger.debug(f"Using streaming parser for large file {file_path} ({file_size / (1024*1024):.1f}MB)")
             try:
                 with open(file_path, "rb") as f:
-                    # For large files, try to stream parse as array
                     items = []
                     try:
                         parser = ijson.items(f, "item")
                         for item in parser:
                             items.append(item)
-                            # Limit memory usage
-                            if len(items) > 10000:  # Process in chunks
-                                break
                     except ijson.JSONError:
                         # If ijson fails, fall back to reading entire file
                         f.seek(0)
@@ -1081,7 +1088,7 @@ class FitbitParser:
 
             if use_parallel:
                 print("    🚀 Using parallel processing for heart rate data")
-                chunk_size = min(30, max(1, len(hr_files) // 20))
+                chunk_size = min(100, max(1, len(hr_files) // self.parallel_processor.max_workers))
                 processed_files = 0
 
                 with tqdm(total=len(hr_files), desc="    💓 Processing HR files",

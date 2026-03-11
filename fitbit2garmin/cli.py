@@ -73,6 +73,12 @@ def cli(verbose):
     default=None,
     help="Maximum number of worker processes (default: auto)",
 )
+@click.option(
+    "--memory-limit-mb",
+    type=int,
+    default=None,
+    help="Memory limit in MB before parallel processing scales back (default: 75%% of available RAM)",
+)
 @click.option("--clear-cache", is_flag=True, help="Clear cached data and start fresh")
 def convert(
     takeout_path,
@@ -83,6 +89,7 @@ def convert(
     resume,
     parallel,
     max_workers,
+    memory_limit_mb,
     clear_cache,
 ):
     """Convert Fitbit Google Takeout data to Garmin formats.
@@ -123,6 +130,16 @@ def convert(
                 f" (max workers: {max_workers})" if max_workers else " (auto)"
             )
             click.echo(f"🚀 Parallel processing: Enabled{workers_text}")
+        if memory_limit_mb:
+            click.echo(f"🧠 Memory limit: {memory_limit_mb} MB")
+        else:
+            try:
+                import psutil
+                available_mb = psutil.virtual_memory().available // (1024 * 1024)
+                effective_mb = max(1024, int(available_mb * 0.75))
+                click.echo(f"🧠 Memory limit: {effective_mb} MB (75% of {available_mb} MB available)")
+            except Exception:
+                pass
 
         # Parse Fitbit data
         click.echo("📖 Parsing Fitbit data...")
@@ -131,6 +148,7 @@ def convert(
             enable_resume=resume,
             enable_parallel=parallel,
             max_workers=max_workers,
+            memory_limit_mb=memory_limit_mb,
         )
 
         # Parse data with detailed progress reporting

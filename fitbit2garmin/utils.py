@@ -57,7 +57,7 @@ class ParallelProcessor:
                 ):
                     file_path = future_to_file[future]
                     try:
-                        result = future.result(timeout=30)  # 30 second timeout per file
+                        result = future.result(timeout=120)  # 120 second timeout per file
                         if result:
                             results.extend(result)
                     except Exception as e:
@@ -306,27 +306,23 @@ def process_json_file_worker(file_path: Path) -> List[Dict[str, Any]]:
 
         # Check file size and use appropriate parsing strategy
         file_size = file_path.stat().st_size
-        
-        # Increased limit to 50MB for heart rate files
-        if file_size > 50 * 1024 * 1024:  # 50MB limit
+
+        if file_size > 500 * 1024 * 1024:  # 500 MB hard limit
             logger.warning(f"Skipping very large file {file_path} ({file_size / (1024*1024):.1f}MB)")
             return []
 
-        # Use streaming parser for files larger than 10MB
+        # Use streaming parser for files larger than 10MB.
+        # Do NOT break early — read every item so no data is silently dropped.
         if file_size > 10 * 1024 * 1024:
             logger.debug(f"Using streaming parser for large file {file_path} ({file_size / (1024*1024):.1f}MB)")
             try:
                 with open(file_path, "rb") as f:
                     result = []
-                    # Try to parse as array of items
                     try:
                         parser = ijson.items(f, "item")
                         for item in parser:
                             if isinstance(item, dict):
                                 result.append(item)
-                            # Limit memory usage
-                            if len(result) > 10000:  # Process in chunks
-                                break
                     except ijson.JSONError:
                         # If ijson fails, fall back to reading entire file
                         f.seek(0)
