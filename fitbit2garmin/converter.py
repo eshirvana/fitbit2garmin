@@ -451,115 +451,182 @@ class DataConverter:
         logger.info(f"Generated {len(fit_files)} FIT files")
         return fit_files
 
+    def _compute_gps_stats(self, gps_data: list) -> dict:
+        """Compute aggregate stats from a GPS trackpoint list.
+
+        Returns a dict that may contain:
+          start_lat, start_lon       — first trackpoint position
+          nec_lat/long, swc_lat/long — bounding box (NE and SW corners)
+          avg_altitude, max_altitude, min_altitude
+          total_descent              — sum of elevation drops (metres)
+          max_speed, avg_speed       — m/s from speed field when present
+        """
+        lats, lons, alts, speeds = [], [], [], []
+        for p in gps_data:
+            if not isinstance(p, dict):
+                continue
+            if "latitude" in p:
+                lats.append(p["latitude"])
+            if "longitude" in p:
+                lons.append(p["longitude"])
+            if "altitude" in p:
+                alts.append(float(p["altitude"]))
+            if "speed" in p:
+                speeds.append(float(p["speed"]))
+
+        stats = {}
+        if lats and lons:
+            stats["start_lat"] = lats[0]
+            stats["start_lon"] = lons[0]
+            stats["nec_lat"] = max(lats)
+            stats["nec_long"] = max(lons)
+            stats["swc_lat"] = min(lats)
+            stats["swc_long"] = min(lons)
+
+        if alts:
+            stats["avg_altitude"] = sum(alts) / len(alts)
+            stats["max_altitude"] = max(alts)
+            stats["min_altitude"] = min(alts)
+            total_descent = sum(
+                alts[i - 1] - alts[i]
+                for i in range(1, len(alts))
+                if alts[i - 1] > alts[i]
+            )
+            if total_descent > 0:
+                stats["total_descent"] = total_descent
+
+        if speeds:
+            stats["max_speed"] = max(speeds)
+            stats["avg_speed"] = sum(speeds) / len(speeds)
+
+        return stats
+
+    def _apply_gps_stats_to_message(self, msg, gps_stats: dict, avg_speed_fallback=None):
+        """Apply GPS-derived stats to a Session or Lap message."""
+        if gps_stats.get("start_lat") is not None:
+            msg.start_position_lat = gps_stats["start_lat"]
+            msg.start_position_long = gps_stats["start_lon"]
+        if gps_stats.get("avg_altitude") is not None:
+            msg.avg_altitude = gps_stats["avg_altitude"]
+            msg.max_altitude = gps_stats["max_altitude"]
+            msg.min_altitude = gps_stats["min_altitude"]
+        if gps_stats.get("total_descent") is not None:
+            msg.total_descent = gps_stats["total_descent"]
+        if gps_stats.get("max_speed") is not None:
+            msg.max_speed = gps_stats["max_speed"]
+        # avg_speed: prefer Fitbit-provided value, fall back to GPS-computed
+        if avg_speed_fallback is not None:
+            msg.avg_speed = avg_speed_fallback
+        elif gps_stats.get("avg_speed") is not None:
+            msg.avg_speed = gps_stats["avg_speed"]
+
     def _generate_fit_file(self, activity: ActivityData) -> Optional[str]:
-        """Generate a FIT file for a single activity."""
+        """Generate a FIT file for a single activity with all available data."""
         try:
             from fit_tool.fit_file_builder import FitFileBuilder
             from fit_tool.profile.messages.activity_message import ActivityMessage
+            from fit_tool.profile.messages.event_message import EventMessage
             from fit_tool.profile.messages.lap_message import LapMessage
-            from fit_tool.profile.messages.record_message import RecordMessage
             from fit_tool.profile.messages.session_message import SessionMessage
             from fit_tool.profile.messages.file_id_message import FileIdMessage
+            from fit_tool.profile.messages.sport_message import SportMessage
             from fit_tool.profile.profile_type import (
                 Sport,
                 SubSport,
                 FileType,
                 Manufacturer,
+                Event,
+                EventType,
             )
-            from datetime import datetime, timezone
 
-            # Create FIT file builder
             builder = FitFileBuilder()
             builder.auto_define = True
 
             # fit-tool expects ALL timestamps as Unix milliseconds.
-            # It handles the FIT-epoch conversion (Dec 31 1989) internally.
             start_ms = int(activity.start_time.timestamp() * 1000)
             end_ms = start_ms + activity.duration_ms
-
-            file_id = FileIdMessage()
-            file_id.type = FileType.ACTIVITY
-            # Manufacturer.FITBIT does not exist in fit-tool; use DEVELOPMENT (255)
-            file_id.manufacturer = Manufacturer.DEVELOPMENT
-            file_id.product = 1
-            file_id.time_created = start_ms
-            builder.add(file_id)
-
-            # Map activity type to FIT sport
-            sport, sub_sport = self._map_activity_to_fit_sport(activity.activity_type)
-
-            # Session message
-            session = SessionMessage()
-            session.sport = sport
-            session.sub_sport = sub_sport
-            session.start_time = start_ms
-            session.timestamp = end_ms
-            session.total_elapsed_time = activity.duration_ms / 1000
-            session.total_timer_time = (
+            timer_time = (
                 activity.active_duration / 1000
                 if activity.active_duration
                 else activity.duration_ms / 1000
             )
 
-            if activity.distance:
-                session.total_distance = (
-                    activity.distance * 1000
-                )  # Convert km to meters
-            if activity.calories:
-                session.total_calories = activity.calories
-            if activity.steps:
-                session.total_steps = activity.steps
-            if activity.average_heart_rate:
-                session.avg_heart_rate = activity.average_heart_rate
-            if activity.max_heart_rate:
-                session.max_heart_rate = activity.max_heart_rate
-            if activity.min_heart_rate:
-                session.min_heart_rate = activity.min_heart_rate
-            if activity.elevation_gain:
-                session.total_ascent = activity.elevation_gain
+            # ── FileId ──────────────────────────────────────────────────────
+            file_id = FileIdMessage()
+            file_id.type = FileType.ACTIVITY
+            file_id.manufacturer = Manufacturer.DEVELOPMENT
+            file_id.product = 1
+            file_id.time_created = start_ms
+            builder.add(file_id)
 
-            # Add heart rate zones to session (use recalculated zones if available)
+            # ── Sport (explicit sport/sub-sport declaration) ─────────────────
+            sport, sub_sport = self._map_activity_to_fit_sport(activity.activity_type)
+            sport_msg = SportMessage()
+            sport_msg.sport = sport
+            sport_msg.sub_sport = sub_sport
+            sport_msg.sport_name = self._garmin_sport_name(activity.activity_type)
+            builder.add(sport_msg)
+
+            # ── Timer-start event ────────────────────────────────────────────
+            start_evt = EventMessage()
+            start_evt.timestamp = start_ms
+            start_evt.event = Event.TIMER
+            start_evt.event_type = EventType.START
+            builder.add(start_evt)
+
+            # ── Pre-compute GPS stats (used by both Session and Lap) ──────────
+            has_gps = bool(activity.gps_data and isinstance(activity.gps_data, list))
+            gps_stats = self._compute_gps_stats(activity.gps_data) if has_gps else {}
+
+            # avg_speed from Fitbit field (km/h → m/s), or derived from distance/time
+            if activity.speed:
+                avg_speed_ms = activity.speed / 3.6
+            elif activity.distance and activity.duration_ms:
+                avg_speed_ms = (activity.distance * 1000) / (activity.duration_ms / 1000)
+            else:
+                avg_speed_ms = None
+
+            # Running/walking cadence from step count
+            avg_cadence = None
+            total_strides = None
+            if activity.steps and activity.duration_ms:
+                duration_min = activity.duration_ms / 60000
+                if activity.activity_type.value in ("running", "treadmill", "walking", "hiking"):
+                    avg_cadence = int(activity.steps / duration_min / 2)  # strides/min
+                    total_strides = activity.steps // 2
+
+            # HR zones
             zones_to_use = (
-                activity.recalculated_hr_zones
-                if activity.recalculated_hr_zones
-                else activity.heart_rate_zones
+                activity.recalculated_hr_zones or activity.heart_rate_zones
             )
+            zone_times = None
             if zones_to_use:
-                # Calculate zone time distribution in seconds
-                zone_times = []
-                for zone in zones_to_use:
-                    zone_times.append(zone.minutes * 60)  # Convert minutes to seconds
+                zt = [z.minutes * 60 for z in zones_to_use]
+                while len(zt) < 5:
+                    zt.append(0)
+                zone_times = zt[:5]
 
-                # FIT format supports up to 5 zones
-                while len(zone_times) < 5:
-                    zone_times.append(0)
-
-                # Add zone times to session
-                if len(zone_times) >= 5:
-                    session.time_in_hr_zone = zone_times[:5]
-
-            # FIT protocol requires Record messages to appear BEFORE Lap/Session.
-            # Garmin Connect will not display GPS coordinates from records placed
-            # after the session summary.
-            if activity.gps_data and isinstance(activity.gps_data, list):
+            # ── Record messages (GPS or time-based) — MUST precede Lap/Session ──
+            if has_gps:
                 self._add_fit_trackpoints(builder, activity)
             else:
-                # Add time-based records for non-GPS activities
                 self._add_fit_time_records(builder, activity)
 
-            # Lap message — must come after Records
+            # ── Timer-stop event ─────────────────────────────────────────────
+            stop_evt = EventMessage()
+            stop_evt.timestamp = end_ms
+            stop_evt.event = Event.TIMER
+            stop_evt.event_type = EventType.STOP_ALL
+            builder.add(stop_evt)
+
+            # ── Lap ──────────────────────────────────────────────────────────
             lap = LapMessage()
             lap.sport = sport
             lap.sub_sport = sub_sport
             lap.start_time = start_ms
             lap.timestamp = end_ms
             lap.total_elapsed_time = activity.duration_ms / 1000
-            lap.total_timer_time = (
-                activity.active_duration / 1000
-                if activity.active_duration
-                else activity.duration_ms / 1000
-            )
-
+            lap.total_timer_time = timer_time
             if activity.distance:
                 lap.total_distance = activity.distance * 1000
             if activity.calories:
@@ -574,38 +641,67 @@ class DataConverter:
                 lap.min_heart_rate = activity.min_heart_rate
             if activity.elevation_gain:
                 lap.total_ascent = activity.elevation_gain
-
-            if zones_to_use:
-                zone_times = []
-                for zone in zones_to_use:
-                    zone_times.append(zone.minutes * 60)
-                while len(zone_times) < 5:
-                    zone_times.append(0)
-                if len(zone_times) >= 5:
-                    lap.time_in_hr_zone = zone_times[:5]
-
+            if avg_cadence is not None:
+                lap.avg_running_cadence = avg_cadence
+            if total_strides is not None:
+                lap.total_strides = total_strides
+            if zone_times:
+                lap.time_in_hr_zone = zone_times
+            self._apply_gps_stats_to_message(lap, gps_stats, avg_speed_ms)
             builder.add(lap)
 
-            # Session message — must come after Lap
+            # ── Session ──────────────────────────────────────────────────────
+            session = SessionMessage()
+            session.sport = sport
+            session.sub_sport = sub_sport
+            session.start_time = start_ms
+            session.timestamp = end_ms
+            session.total_elapsed_time = activity.duration_ms / 1000
+            session.total_timer_time = timer_time
+            session.num_laps = 1
+            if activity.distance:
+                session.total_distance = activity.distance * 1000
+            if activity.calories:
+                session.total_calories = activity.calories
+            if activity.steps:
+                session.total_steps = activity.steps
+            if activity.average_heart_rate:
+                session.avg_heart_rate = activity.average_heart_rate
+            if activity.max_heart_rate:
+                session.max_heart_rate = activity.max_heart_rate
+            if activity.min_heart_rate:
+                session.min_heart_rate = activity.min_heart_rate
+            if activity.elevation_gain:
+                session.total_ascent = activity.elevation_gain
+            if avg_cadence is not None:
+                session.avg_running_cadence = avg_cadence
+            if total_strides is not None:
+                session.total_strides = total_strides
+            if zone_times:
+                session.time_in_hr_zone = zone_times
+            if gps_stats.get("nec_lat") is not None:
+                session.nec_lat = gps_stats["nec_lat"]
+                session.nec_long = gps_stats["nec_long"]
+                session.swc_lat = gps_stats["swc_lat"]
+                session.swc_long = gps_stats["swc_long"]
+            self._apply_gps_stats_to_message(session, gps_stats, avg_speed_ms)
             builder.add(session)
 
-            # Activity message
+            # ── Activity ─────────────────────────────────────────────────────
             activity_msg = ActivityMessage()
             activity_msg.timestamp = end_ms
-            activity_msg.type = 0  # Manual
-            activity_msg.event = 26  # Activity
-            # local_timestamp field takes Unix seconds (not ms)
-            activity_msg.local_timestamp = end_ms // 1000
+            activity_msg.num_sessions = 1
+            activity_msg.type = 0        # Manual
+            activity_msg.event = 26      # Activity
+            activity_msg.local_timestamp = end_ms // 1000  # Unix seconds
             builder.add(activity_msg)
 
-            # Generate filename
+            # ── Write file ───────────────────────────────────────────────────
             activity_type_name = activity.activity_type.value.replace("_", "-")
             filename = f"{activity_type_name}_{activity.log_id}_{activity.start_time.strftime('%Y%m%d_%H%M%S')}.fit"
             filepath = self.output_dir / filename
 
-            # Build and save FIT file
             fit_file = builder.build()
-
             with open(filepath, "wb") as f:
                 f.write(fit_file.to_bytes())
 
