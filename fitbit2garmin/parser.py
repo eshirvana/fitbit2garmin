@@ -1078,41 +1078,48 @@ class FitbitParser:
             except Exception:
                 pass
 
-            use_parallel = (
-                self.enable_parallel
-                and len(hr_files) > 50
-                and self._check_memory_usage()
-            )
+            use_parallel = self.enable_parallel and len(hr_files) > 4
 
             start_time = time.time()
 
             if use_parallel:
                 print("    🚀 Using parallel processing for heart rate data")
-                chunk_size = min(100, max(1, len(hr_files) // self.parallel_processor.max_workers))
-                processed_files = 0
+                # Process all files with a SINGLE ProcessPoolExecutor.
+                # Aggregate each file's records immediately as futures complete —
+                # never accumulate the full result set in RAM simultaneously.
+                from concurrent.futures import ProcessPoolExecutor, as_completed
 
+                workers = self.parallel_processor.max_workers
                 with tqdm(total=len(hr_files), desc="    💓 Processing HR files",
                           unit="files") as pbar:
-                    for i in range(0, len(hr_files), chunk_size):
-                        chunk = hr_files[i: i + chunk_size]
-                        chunk_results = self.parallel_processor.process_files_parallel_with_progress(
-                            chunk, process_json_file_worker, pbar, processed_files
-                        )
-                        processed_files += len(chunk)
-
-                        for item in chunk_results:
-                            if isinstance(item, dict):
-                                self._aggregate_hr_item(item, daily_agg)
-
-                        del chunk_results
-                        gc.collect()
-
-                        elapsed = time.time() - start_time
-                        rate = processed_files / elapsed if elapsed > 0 else 0
-                        pbar.set_postfix({
-                            "days": len(daily_agg),
-                            "rate": f"{rate:.1f} files/s",
-                        })
+                    with ProcessPoolExecutor(max_workers=workers) as executor:
+                        future_to_file = {
+                            executor.submit(process_json_file_worker, fp): fp
+                            for fp in hr_files
+                        }
+                        completed = 0
+                        for future in as_completed(future_to_file):
+                            try:
+                                items = future.result(timeout=120)
+                                if items:
+                                    for item in items:
+                                        if isinstance(item, dict):
+                                            self._aggregate_hr_item(item, daily_agg)
+                            except Exception as e:
+                                fp = future_to_file[future]
+                                logger.warning(f"Error processing {fp.name}: {e}")
+                            finally:
+                                future_to_file.pop(future, None)
+                                completed += 1
+                                pbar.update(1)
+                                if completed % 50 == 0:
+                                    elapsed = time.time() - start_time
+                                    rate = completed / elapsed if elapsed > 0 else 0
+                                    pbar.set_postfix({
+                                        "days": len(daily_agg),
+                                        "rate": f"{rate:.1f} f/s",
+                                    })
+                                    gc.collect()
             else:
                 with tqdm(total=len(hr_files), desc="    💓 Processing HR files",
                           unit="files", leave=False) as pbar:
