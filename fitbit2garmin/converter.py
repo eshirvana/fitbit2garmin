@@ -538,9 +538,16 @@ class DataConverter:
                 if len(zone_times) >= 5:
                     session.time_in_hr_zone = zone_times[:5]
 
-            builder.add(session)
+            # FIT protocol requires Record messages to appear BEFORE Lap/Session.
+            # Garmin Connect will not display GPS coordinates from records placed
+            # after the session summary.
+            if activity.gps_data and isinstance(activity.gps_data, list):
+                self._add_fit_trackpoints(builder, activity)
+            else:
+                # Add time-based records for non-GPS activities
+                self._add_fit_time_records(builder, activity)
 
-            # Lap message
+            # Lap message — must come after Records
             lap = LapMessage()
             lap.sport = sport
             lap.sub_sport = sub_sport
@@ -568,28 +575,19 @@ class DataConverter:
             if activity.elevation_gain:
                 lap.total_ascent = activity.elevation_gain
 
-            # Add heart rate zones to lap as well
             if zones_to_use:
                 zone_times = []
                 for zone in zones_to_use:
-                    zone_times.append(zone.minutes * 60)  # Convert minutes to seconds
-
-                # FIT format supports up to 5 zones
+                    zone_times.append(zone.minutes * 60)
                 while len(zone_times) < 5:
                     zone_times.append(0)
-
-                # Add zone times to lap
                 if len(zone_times) >= 5:
                     lap.time_in_hr_zone = zone_times[:5]
 
             builder.add(lap)
 
-            # Add GPS trackpoints if available
-            if activity.gps_data and isinstance(activity.gps_data, list):
-                self._add_fit_trackpoints(builder, activity)
-            else:
-                # Add time-based records for non-GPS activities
-                self._add_fit_time_records(builder, activity)
+            # Session message — must come after Lap
+            builder.add(session)
 
             # Activity message
             activity_msg = ActivityMessage()
@@ -705,21 +703,21 @@ class DataConverter:
                     point_ms = int(point_time.timestamp() * 1000)
                 record.timestamp = point_ms
 
-                # Position — FIT uses semicircles: degrees * (2^31 / 180)
+                # fit-tool expects degrees (it handles the semicircle conversion internally).
+                # Do NOT pre-convert to semicircles — that causes a double conversion
+                # and overflows the 32-bit signed int range.
                 if "latitude" in gps_point and "longitude" in gps_point:
-                    semicircles_factor = 2**31 / 180
-                    record.position_lat = int(gps_point["latitude"] * semicircles_factor)
-                    record.position_long = int(gps_point["longitude"] * semicircles_factor)
+                    record.position_lat = gps_point["latitude"]
+                    record.position_long = gps_point["longitude"]
 
                 # Altitude
                 if "altitude" in gps_point:
                     record.altitude = gps_point["altitude"]
 
-                # Distance (cumulative)
+                # Distance (cumulative, already in meters — from TCX <DistanceMeters>
+                # or from the Haversine accumulator in _parse_gps_data)
                 if "distance" in gps_point:
-                    cumulative_distance = (
-                        gps_point["distance"] * 1000
-                    )  # Convert km to meters
+                    cumulative_distance = gps_point["distance"]
                 elif i > 0 and "latitude" in gps_point and "longitude" in gps_point:
                     # Calculate distance from previous point if not provided
                     prev_point = activity.gps_data[i - 1]
