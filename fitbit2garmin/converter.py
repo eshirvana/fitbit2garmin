@@ -907,87 +907,100 @@ class DataConverter:
 
     def _add_fit_trackpoints(self, builder, activity: ActivityData):
         """Add GPS trackpoints to FIT file, enriched with intraday HR when available."""
+        from fit_tool.profile.messages.record_message import RecordMessage
+        from datetime import timedelta
+
+        if not activity.gps_data:
+            return
+
+        # Pre-load intraday HR data for this activity (keyed by unix_ms)
         try:
-            from fit_tool.profile.messages.record_message import RecordMessage
-            from datetime import timedelta
-
-            if not activity.gps_data:
-                return
-
-            # Pre-load intraday HR data for this activity (keyed by unix_ms)
             intraday_hr = self._get_activity_hr_data(activity)
-            # Build a lookup: for each GPS point, find the nearest HR reading within ±30s
             hr_lookup: Dict[int, int] = {ts: bpm for ts, bpm in intraday_hr}
+        except Exception:
+            hr_lookup = {}
 
-            def _nearest_hr(point_ms: int) -> Optional[int]:
-                """Find the nearest intraday HR reading within ±30 000 ms."""
-                if not hr_lookup:
-                    return None
-                best_ts = min(hr_lookup, key=lambda t: abs(t - point_ms))
-                if abs(best_ts - point_ms) <= 30000:
-                    return hr_lookup[best_ts]
+        def _nearest_hr(point_ms: int) -> Optional[int]:
+            """Find the nearest intraday HR reading within ±30 000 ms."""
+            if not hr_lookup:
                 return None
+            best_ts = min(hr_lookup, key=lambda t: abs(t - point_ms))
+            if abs(best_ts - point_ms) <= 30000:
+                return hr_lookup[best_ts]
+            return None
 
-            # Calculate time intervals between points
-            duration_seconds = activity.duration_ms / 1000
-            num_points = len(activity.gps_data)
-            time_interval = duration_seconds / num_points if num_points > 0 else 1
+        # Calculate time intervals between points
+        duration_seconds = activity.duration_ms / 1000
+        num_points = len(activity.gps_data)
+        time_interval = duration_seconds / num_points if num_points > 0 else 1
 
-            cumulative_distance = 0
+        cumulative_distance = 0
+        added = 0
 
-            for i, gps_point in enumerate(activity.gps_data):
-                if not isinstance(gps_point, dict):
-                    continue
+        for i, gps_point in enumerate(activity.gps_data):
+            if not isinstance(gps_point, dict):
+                continue
 
-                record = RecordMessage()
+            # Skip points without lat/lon — they carry no GPS value
+            if "latitude" not in gps_point or "longitude" not in gps_point:
+                continue
 
-                # fit-tool expects Unix milliseconds for all timestamps.
-                # If the GPS time string has no timezone (naive), fall back to
-                # offset-based timing so records stay within the session window.
-                point_ms = None
-                if "time" in gps_point:
-                    try:
+            record = RecordMessage()
+
+            # fit-tool expects Unix milliseconds for all timestamps.
+            # If the GPS time string has no timezone (naive), fall back to
+            # offset-based timing so records stay within the session window.
+            point_ms = None
+            if "time" in gps_point:
+                try:
+                    time_val = gps_point["time"]
+                    if isinstance(time_val, str):
                         from dateutil.parser import parse as _parse_dt
-                        parsed_t = _parse_dt(gps_point["time"])
-                        if parsed_t.tzinfo is not None:
-                            # Timezone-aware: safe to use directly
-                            point_ms = int(parsed_t.timestamp() * 1000)
-                        else:
-                            # Timezone-naive: assume UTC (Fitbit TCX uses UTC with Z)
-                            from datetime import timezone as _tz
-                            point_ms = int(
-                                parsed_t.replace(tzinfo=_tz.utc).timestamp() * 1000
-                            )
-                    except Exception:
-                        pass
-                if point_ms is None:
-                    point_time = activity.start_time + timedelta(seconds=i * time_interval)
-                    point_ms = int(point_time.timestamp() * 1000)
-                record.timestamp = point_ms
+                        parsed_t = _parse_dt(time_val)
+                    else:
+                        # Already a datetime object
+                        parsed_t = time_val
+                    if parsed_t.tzinfo is not None:
+                        point_ms = int(parsed_t.timestamp() * 1000)
+                    else:
+                        # Timezone-naive: assume UTC (Fitbit TCX uses UTC with Z)
+                        from datetime import timezone as _tz
+                        point_ms = int(
+                            parsed_t.replace(tzinfo=_tz.utc).timestamp() * 1000
+                        )
+                except Exception:
+                    pass
+            if point_ms is None:
+                point_time = activity.start_time + timedelta(seconds=i * time_interval)
+                point_ms = int(point_time.timestamp() * 1000)
+            record.timestamp = point_ms
 
-                # fit-tool expects degrees (it handles the semicircle conversion internally).
-                # Do NOT pre-convert to semicircles — that causes a double conversion
-                # and overflows the 32-bit signed int range.
-                if "latitude" in gps_point and "longitude" in gps_point:
-                    record.position_lat = gps_point["latitude"]
-                    record.position_long = gps_point["longitude"]
+            # fit-tool expects degrees (it handles the semicircle conversion internally).
+            # Do NOT pre-convert to semicircles — that causes a double conversion
+            # and overflows the 32-bit signed int range.
+            record.position_lat = gps_point["latitude"]
+            record.position_long = gps_point["longitude"]
 
-                # Altitude
-                if "altitude" in gps_point:
-                    record.altitude = gps_point["altitude"]
+            # Altitude — clamp to UINT16 valid range after encoding (offset=500, scale=5)
+            # Valid decoded range: -500m to 12607m. Clamp silently; GPS noise can exceed this.
+            if "altitude" in gps_point:
+                try:
+                    record.altitude = max(-499.0, float(gps_point["altitude"]))
+                except Exception as _e:
+                    logger.debug(f"Skipping altitude for GPS point {i}: {_e}")
 
-                # Distance (cumulative, already in meters — from TCX <DistanceMeters>
-                # or from the Haversine accumulator in _parse_gps_data)
-                if "distance" in gps_point:
-                    cumulative_distance = gps_point["distance"]
-                elif i > 0 and "latitude" in gps_point and "longitude" in gps_point:
-                    # Calculate distance from previous point if not provided
-                    prev_point = activity.gps_data[i - 1]
-                    if (
-                        isinstance(prev_point, dict)
-                        and "latitude" in prev_point
-                        and "longitude" in prev_point
-                    ):
+            # Distance (cumulative, already in meters — from TCX <DistanceMeters>
+            # or from the Haversine accumulator in _parse_gps_data)
+            if "distance" in gps_point:
+                cumulative_distance = gps_point["distance"]
+            elif i > 0 and activity.gps_data:
+                prev_point = activity.gps_data[i - 1]
+                if (
+                    isinstance(prev_point, dict)
+                    and "latitude" in prev_point
+                    and "longitude" in prev_point
+                ):
+                    try:
                         distance_increment = self._calculate_distance(
                             prev_point["latitude"],
                             prev_point["longitude"],
@@ -995,25 +1008,48 @@ class DataConverter:
                             gps_point["longitude"],
                         )
                         cumulative_distance += distance_increment
+                    except Exception:
+                        pass
 
+            try:
                 record.distance = cumulative_distance
+            except Exception as _e:
+                logger.debug(f"Skipping distance for GPS point {i}: {_e}")
 
-                # Speed
-                if "speed" in gps_point:
-                    record.speed = gps_point["speed"]
+            # Speed — cap at fit-tool UINT16 max / scale (65.535 m/s ≈ 236 km/h)
+            if "speed" in gps_point:
+                try:
+                    record.speed = min(float(gps_point["speed"]), 65.0)
+                except Exception as _e:
+                    logger.debug(f"Skipping speed for GPS point {i}: {_e}")
 
-                # Heart rate: prefer embedded GPS point HR, then intraday HR lookup
-                if "heart_rate" in gps_point:
-                    record.heart_rate = gps_point["heart_rate"]
-                else:
-                    intraday_bpm = _nearest_hr(point_ms)
-                    if intraday_bpm:
+            # Heart rate: prefer embedded GPS point HR, then intraday HR lookup
+            if "heart_rate" in gps_point:
+                try:
+                    record.heart_rate = int(gps_point["heart_rate"])
+                except Exception:
+                    pass
+            else:
+                intraday_bpm = _nearest_hr(point_ms)
+                if intraday_bpm:
+                    try:
                         record.heart_rate = intraday_bpm
+                    except Exception:
+                        pass
 
+            try:
                 builder.add(record)
+                added += 1
+            except Exception as _e:
+                logger.warning(
+                    f"Failed to add GPS record {i} (lat={gps_point['latitude']}, "
+                    f"lon={gps_point['longitude']}): {_e}",
+                    exc_info=True,
+                )
 
-        except Exception as e:
-            logger.warning(f"Error adding FIT trackpoints: {e}")
+        logger.debug(
+            f"Added {added}/{num_points} GPS trackpoints for activity {activity.log_id}"
+        )
 
     def _add_fit_time_records(self, builder, activity: ActivityData):
         """Add time-based records for non-GPS activities, using intraday HR when available."""
@@ -1152,7 +1188,13 @@ class DataConverter:
 
         added = skipped = 0
 
-        for entry in sorted(sleep_data, key=lambda e: e.start_time):
+        def _sleep_sort_key(e):
+            t = e.start_time
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=_tz.utc)
+            return t
+
+        for entry in sorted(sleep_data, key=_sleep_sort_key):
             if entry.duration_ms <= 0:
                 skipped += 1
                 continue
@@ -1437,6 +1479,12 @@ class DataConverter:
         file_id.time_created = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
         builder.add(file_id)
 
+        # Fitbit exports weight in lbs for US-locale accounts, kg for metric accounts.
+        # No unit field is present in the JSON.  Mirror the same heuristic used by
+        # the exporter: values > 100 are almost certainly lbs and are converted to kg.
+        _LBS_TO_KG = 0.453592
+        _LBS_THRESHOLD = 100.0
+
         skipped = 0
         added = 0
         for entry in sorted(body_composition, key=lambda e: e.date):
@@ -1452,18 +1500,23 @@ class DataConverter:
             )
             ts_ms = int(dt.timestamp() * 1000)
 
+            is_lbs = entry.weight > _LBS_THRESHOLD
+
+            def _to_kg(v):
+                return round(v * _LBS_TO_KG, 2) if is_lbs else round(float(v), 2)
+
             ws = WeightScaleMessage()
             ws.timestamp = ts_ms
-            ws.weight = float(entry.weight)  # kg
+            ws.weight = _to_kg(entry.weight)
 
             if entry.body_fat_percentage is not None:
                 ws.percent_fat = float(entry.body_fat_percentage)
             if entry.water_percentage is not None:
                 ws.percent_hydration = float(entry.water_percentage)
             if entry.muscle_mass is not None:
-                ws.muscle_mass = float(entry.muscle_mass)
+                ws.muscle_mass = _to_kg(entry.muscle_mass)
             if entry.bone_mass is not None:
-                ws.bone_mass = float(entry.bone_mass)
+                ws.bone_mass = _to_kg(entry.bone_mass)
 
             builder.add(ws)
             added += 1
