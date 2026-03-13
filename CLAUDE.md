@@ -26,7 +26,13 @@ black fitbit2garmin/
 flake8 fitbit2garmin/
 ```
 
-No tests currently exist in the repo.
+Tests live in `tests/test_converter.py`. Run with:
+```bash
+uv run pytest tests/                     # all 67 tests
+uv run pytest tests/ -v                  # verbose
+uv run pytest tests/ -k "TestWeightFit"  # single class
+```
+Install test dependencies: `pip install -r requirements-dev.txt`.
 
 ## Architecture
 

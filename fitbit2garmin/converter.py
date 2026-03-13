@@ -598,25 +598,34 @@ class DataConverter:
         return stats
 
     def _apply_gps_stats_to_message(self, msg, gps_stats: dict, avg_speed_fallback=None):
-        """Apply GPS-derived stats to a Session or Lap message."""
+        """Apply GPS-derived stats to a Session or Lap message.
+
+        Altitude values are clamped to the FIT UINT16+offset valid range
+        (≥ -499 m).  Speed values are capped at 65.0 m/s to stay within the
+        FIT UINT16 scale=1000 range.  This prevents encoding exceptions when
+        GPS data contains noisy or erroneous outliers.
+        """
+        _ALT_MIN = -499.0   # FIT altitude field minimum (UINT16, offset=500, scale=5)
+        _SPD_MAX = 65.0     # FIT speed field maximum (UINT16, scale=1000)
+
         if gps_stats.get("start_lat") is not None:
             msg.start_position_lat = gps_stats["start_lat"]
             msg.start_position_long = gps_stats["start_lon"]
         if gps_stats.get("avg_altitude") is not None:
-            msg.avg_altitude = gps_stats["avg_altitude"]
-            msg.max_altitude = gps_stats["max_altitude"]
-            msg.min_altitude = gps_stats["min_altitude"]
+            msg.avg_altitude = max(_ALT_MIN, gps_stats["avg_altitude"])
+            msg.max_altitude = max(_ALT_MIN, gps_stats["max_altitude"])
+            msg.min_altitude = max(_ALT_MIN, gps_stats["min_altitude"])
         if gps_stats.get("total_ascent") is not None:
             msg.total_ascent = gps_stats["total_ascent"]
         if gps_stats.get("total_descent") is not None:
             msg.total_descent = gps_stats["total_descent"]
         if gps_stats.get("max_speed") is not None:
-            msg.max_speed = gps_stats["max_speed"]
+            msg.max_speed = min(_SPD_MAX, gps_stats["max_speed"])
         # avg_speed: prefer Fitbit-provided value, fall back to GPS-computed
         if avg_speed_fallback is not None:
-            msg.avg_speed = avg_speed_fallback
+            msg.avg_speed = min(_SPD_MAX, avg_speed_fallback)
         elif gps_stats.get("avg_speed") is not None:
-            msg.avg_speed = gps_stats["avg_speed"]
+            msg.avg_speed = min(_SPD_MAX, gps_stats["avg_speed"])
 
     def _generate_fit_file(self, activity: ActivityData) -> Optional[str]:
         """Generate a FIT file for a single activity with all available data."""
