@@ -8,6 +8,8 @@ A comprehensive Python tool for converting Fitbit Google Takeout data to Garmin 
 - **Multiple Export Formats**: Supports CSV, TCX, GPX, and FIT formats
 - **Correct Sport Type Mapping**: 30+ activity types mapped to the right Garmin sport in FIT files (Tennis, Basketball, Soccer, Golf, Rowing, Boxing, and more)
 - **GPS Data Extraction**: Reads GPS tracks from Fitbit's `Activities/*.tcx` files and embeds them in exported TCX/GPX/FIT files
+- **GPS Download**: Fetch GPS tracks directly from the Fitbit API for activities whose GPS was not included in the Takeout
+- **Health Data FIT Export**: Weight, steps, sleep, SpO2, and HRV data exported as FIT files
 - **Advanced Heart Rate Zone Analysis**: Age-based zone calculations with Garmin compatibility
 - **Batch Processing**: Handles years of historical data efficiently with parallel processing
 - **Resume Capability**: Skip already-processed files on interrupted conversions
@@ -15,21 +17,31 @@ A comprehensive Python tool for converting Fitbit Google Takeout data to Garmin 
 
 ## Supported Data Types
 
-### ✅ Fully Supported
-- **Activities**: GPS tracks, exercise sessions with enhanced data (TCX/GPX/FIT export)
-- **Heart Rate Zones**: Advanced zone calculation and recalibration with age-based formulas
-- **Daily Metrics**: Steps, calories, distance, floors (CSV export)
-- **Body Composition**: Weight, BMI, body fat percentage (CSV export)
-- **Sleep Data**: Duration, stages, sleep score, REM/deep sleep analysis (CSV export)
-- **Heart Rate**: Continuous HR, resting HR, zone analysis (CSV export)
-- **GPS Data**: Extracted from Fitbit's `Activities/` TCX files with speed and elevation
+### ✅ Activities (FIT / TCX / GPX)
+- **Activities**: GPS tracks, exercise sessions with enhanced data
+- **Intraday Heart Rate**: Per-second HR embedded in FIT records from Fitbit's intraday data files
+- **GPS with elevation and speed**: Extracted from `Activities/` TCX files, including computed speed between trackpoints
+- **Distance & elevation**: JSON distance preferred; GPS-derived fallback if JSON is absent
 
-### ⚠️ Partially Supported
-- **Heart Rate Variability**: Sleep HRV data
-- **Stress Scores**: Daily stress levels
-- **Active Zone Minutes**: Cardio/peak minutes
-- **Temperature Data**: Skin temperature variations
-- **SpO2 Data**: Blood oxygen levels
+### ✅ Health Data FIT Files (importable)
+| Output file | Content | Garmin FIT type |
+|---|---|---|
+| `weight.fit` | Weight (kg), body fat %, muscle mass, bone mass, hydration | `weight_scale` (message 30) |
+| `monitoring.fit` | Daily steps, distance, calories, active minutes | `monitoring` (message 55) |
+| `sleep.fit` | Sleep stage segments (deep/light/REM/wake) with durations | `monitoring` (MONITORING_B) |
+| `spo2.fit` | Daily SpO2 % (`saturated_hemoglobin_percent`) | `record` in ACTIVITY file |
+| `hrv.fit` | Daily RMSSD (ms) stored as HRV time field | `hrv` (message 78) in ACTIVITY |
+
+> **Note**: Garmin Connect's manual upload portal accepts activity FIT files and weight FIT files. Sleep, SpO2, and HRV FIT files are valid FIT format and can be parsed by FIT-compatible tools, but Garmin Connect currently does not surface them in its dashboard from manual upload.
+
+### ✅ CSV Archive (personal data, not importable to Garmin Connect)
+- **Daily Metrics**: Steps, calories, distance, floors
+- **Body Composition**: Weight, BMI, body fat percentage
+- **Sleep Data**: Duration, stages, sleep score, REM/deep/light analysis
+- **Heart Rate**: Continuous HR, resting HR, zone analysis
+- **HRV**: Daily RMSSD values
+- **SpO2**: Blood oxygen readings
+- **Active Zone Minutes**: Cardio/peak zone minutes
 
 ## Activity Type Mapping
 
@@ -87,7 +99,34 @@ pip install -e .
 3. Choose your export format (ZIP recommended)
 4. Download and extract the archive
 
-### 2. Convert Your Data
+### 2. (Optional) Download GPS Tracks from Fitbit API
+
+Fitbit's Google Takeout does **not** include GPS track data — it only stores a `tcxLink` URL per GPS-enabled activity. To get actual GPS coordinates embedded in your FIT files, you must download them from the Fitbit API first.
+
+#### Get a Fitbit Access Token (one-time setup)
+
+1. Go to [https://dev.fitbit.com/apps/new](https://dev.fitbit.com/apps/new)
+   - Application Type: **Personal**
+   - Redirect URL: `https://localhost`
+2. Note your **Client ID**.
+3. Open this URL in a browser (replace `YOUR_CLIENT_ID`):
+   ```
+   https://www.fitbit.com/oauth2/authorize?response_type=token
+     &client_id=YOUR_CLIENT_ID
+     &redirect_uri=https%3A%2F%2Flocalhost
+     &scope=activity%20location
+     &expires_in=604800
+   ```
+   > ⚠️ Both `activity` **and** `location` scopes are required. Using only `activity` will result in HTTP 403 errors.
+4. Approve access. Copy the `access_token` value from the redirect URL.
+5. Run:
+   ```bash
+   fitbit2garmin fetch-gps path/to/Takeout --token <your_token>
+   ```
+
+GPS TCX files are saved to `<Fitbit>/Activities/` inside your Takeout directory. Re-run `convert` afterwards to embed the GPS in your FIT files.
+
+### 3. Convert Your Data
 
 #### Basic Conversion
 ```bash
@@ -101,8 +140,12 @@ fitbit2garmin convert path/to/Takeout --output-dir ./my-garmin-data
 
 #### Choose Export Formats
 ```bash
+fitbit2garmin convert path/to/Takeout --format fit
+fitbit2garmin convert path/to/Takeout --format csv --format fit
 fitbit2garmin convert path/to/Takeout --format csv --format tcx --format gpx --format fit
 ```
+
+> Only the requested formats are generated. Specifying `--format fit` will **not** also create TCX files.
 
 #### Export Only Activities
 ```bash
@@ -114,59 +157,85 @@ fitbit2garmin convert path/to/Takeout --activities-only
 fitbit2garmin convert path/to/Takeout --daily-only
 ```
 
-### 3. Analyze Your Data (Optional)
+### 4. Analyze Your Data (Optional)
 ```bash
 fitbit2garmin analyze path/to/Takeout
 ```
 
-### 4. Debug Activity Types
+### 5. Debug Activity Types
 ```bash
 fitbit2garmin debug-activities path/to/Takeout
 ```
 
 Shows TCX sport and FIT sport side-by-side for every activity type detected in your data, flagging any that need FIT format for correct sport display.
 
-### 5. Get Help
+### 6. Get Help
 ```bash
 fitbit2garmin --help
 fitbit2garmin convert --help
+fitbit2garmin fetch-gps --help
 fitbit2garmin info
 ```
 
 ## Output Files
 
-### CSV Files (Personal Data Archive)
-These files cannot be imported into Garmin Connect — Garmin Connect has no CSV import for daily health metrics. They are useful as a personal archive, for analysis in spreadsheet tools, or as input for third-party scripts.
+### Activity Files (importable into Garmin Connect)
+- `{type}_{logid}_{timestamp}.fit` — Native Garmin FIT format (**recommended**)
+- `{type}_{logid}_{timestamp}.tcx` — TCX format (sport limited to 5 types)
+- `activity_{logid}_{timestamp}.gpx` — GPS activities in GPX format
 
-- `fitbit_steps.csv` - Daily step counts
-- `fitbit_distance.csv` - Daily distance traveled
-- `fitbit_calories.csv` - Daily calories burned
-- `fitbit_sleep.csv` - Sleep duration and quality
-- `fitbit_heart_rate.csv` - Daily heart rate summaries
-- `fitbit_heart_rate_zones.csv` - Heart rate zone analysis per activity
-- `fitbit_body_composition.csv` - Weight and body metrics
-- `fitbit_activities.csv` - Activity summaries and metrics
-- `garmin_connect_import.csv` - Combined summary (reference only)
+### Health Data FIT Files
+- `weight.fit` — Body composition history (weight, fat %, muscle, bone)
+- `monitoring.fit` — Daily steps, distance, calories, active minutes
+- `sleep.fit` — Sleep stage history (deep / light / REM / wake segments)
+- `spo2.fit` — Daily blood oxygen saturation
+- `hrv.fit` — Daily HRV (RMSSD) values
 
-### Activity Files
-- `{type}_{logid}_{timestamp}.tcx` - Individual activities in TCX format
-- `activity_{logid}_{timestamp}.gpx` - GPS activities in GPX format
-- `{type}_{logid}_{timestamp}.fit` - Native Garmin FIT format (**recommended**)
+### CSV Files (personal data archive)
+These files are useful as a personal archive or for analysis in spreadsheet tools.
+
+- `fitbit_steps.csv` — Daily step counts
+- `fitbit_distance.csv` — Daily distance traveled
+- `fitbit_calories.csv` — Daily calories burned
+- `fitbit_sleep.csv` — Sleep duration and quality
+- `fitbit_heart_rate.csv` — Daily heart rate summaries
+- `fitbit_heart_rate_zones.csv` — Heart rate zone analysis per activity
+- `fitbit_body_composition.csv` — Weight and body metrics
+- `fitbit_activities.csv` — Activity summaries and metrics
+- `garmin_connect_import.csv` — Combined summary (reference only)
 
 ## Importing to Garmin Connect
 
-> **Important**: Garmin Connect only supports importing **activity files** (FIT, TCX, GPX). It has no import mechanism for daily health metrics such as steps, sleep, body weight, or heart rate. Those data points are synced from Garmin devices — there is no way to bulk-import them from CSV files.
-
-### Uploading Activities
+### Activities
 1. Log into [Garmin Connect](https://connect.garmin.com/)
-2. Go to **Import Data** in the menu (or drag-and-drop on the web app)
-3. Upload **FIT files** — recommended for all activities; carries the correct sport type for all 30+ activity types
-4. If FIT upload fails for a specific activity, try the **TCX** or **GPX** file instead
+2. Go to **Import Data** (or drag-and-drop on the web app)
+3. Upload **FIT files** — recommended; carries the correct sport type for all 30+ activity types
+4. If FIT upload fails for a specific activity, try **TCX** or **GPX** instead
 
-### Recommended Format Priority
-1. **FIT files** — correct sport types for all activities, intraday HR embedded, GPS bounding box
+### Weight Data
+Upload `weight.fit` via Garmin Connect's **Import Data** button. Your weight history, body fat %, muscle mass, and bone mass will populate in the Health Snapshot / Body Composition section.
+
+### Steps / Daily Activity
+Upload `monitoring.fit` via **Import Data**. Results may vary — Garmin Connect's upload portal is primarily designed for activity files.
+
+### Sleep, SpO2, HRV
+Upload `sleep.fit`, `spo2.fit`, and `hrv.fit` via **Import Data**. These are valid FIT files using standard message types (monitoring, activity record, HRV). Garmin Connect may not surface them in its health dashboard — they are primarily useful for FIT-compatible third-party analysis tools.
+
+### Recommended Format Priority for Activities
+1. **FIT files** — correct sport types, intraday HR embedded, GPS data included
 2. **TCX files** — fallback; sport limited to Running/Walking/Biking/Swimming/Other
 3. **GPX files** — GPS track only, no HR or distance metadata
+
+## GPS Data
+
+### How GPS Works in This Tool
+Fitbit's Google Takeout includes `tcxLink` URLs for GPS activities but **not the actual GPS track data**. The GPS pipeline has two stages:
+
+1. **Local matching** (automatic): If `Activities/*.tcx` files exist in your Takeout, they are matched to activities by log ID or start time and embedded automatically.
+2. **API download** (manual, one-time): Use `fetch-gps` to download GPS TCX files from Fitbit's API. Requires an OAuth token with both `activity` and `location` scopes.
+
+### Distance and Elevation Fallback
+If the JSON activity record has distance, it takes priority. Otherwise, distance is computed from GPS trackpoints. Elevation gain from the JSON (barometric altimeter) takes priority over GPS-derived elevation (which is noisier).
 
 ## Advanced Heart Rate Zone Features
 
@@ -174,71 +243,59 @@ These files cannot be imported into Garmin Connect — Garmin Connect has no CSV
 - **Age-based formulas**: Uses Tanaka, Fox, Gellish, and Nes formulas for max HR estimation
 - **Karvonen method**: Calculates zones using heart rate reserve when resting HR is available
 - **User profile estimation**: Automatically determines fitness level from activity patterns
-- **Zone validation**: Checks for overlaps, gaps, and realistic heart rate ranges
 
 ### Multiple Zone Systems
 - **Garmin Standard**: 5-zone system (Active Recovery, Aerobic Base, Aerobic, Lactate Threshold, Neuromuscular)
-- **5-Zone System**: Traditional zones (Recovery, Aerobic, Tempo, Threshold, Anaerobic)
 - **Fitbit Mapping**: Converts Fitbit's 3-zone system to Garmin's 5-zone system
 
 ## Data Quality and Limitations
 
-### What Transfers to Garmin Connect (via FIT/TCX/GPX upload)
-- ✅ Activity GPS tracks (extracted from Fitbit's `Activities/` directory)
+### What Transfers to Garmin Connect via Activity Upload
+- ✅ Activity GPS tracks (local TCX files or downloaded via `fetch-gps`)
 - ✅ Exercise duration, calories, distance
 - ✅ Per-activity heart rate (intraday data embedded in FIT records)
 - ✅ Heart rate zones with age-based recalculation
 - ✅ 30+ activity types with correct Garmin sport mapping
-- ✅ Distance unit normalization (miles → km for US accounts)
-
-### What Is Exported as CSV (archive/analysis only — not importable into Garmin Connect)
-- 📁 Daily step counts and distance
-- 📁 Sleep duration, efficiency, and sleep stages (REM, light, deep)
-- 📁 Body weight and composition
-- 📁 Daily heart rate summaries and resting HR
+- ✅ Elevation gain (barometric altimeter from JSON, GPS-derived fallback)
 
 ### Known Limitations
 - ⚠️ TCX format only supports Running/Walking/Biking/Swimming/Other — import `.fit` files for Tennis, Basketball, Soccer, etc.
-- ⚠️ Heart rate variability data is limited to sleep periods
-- ⚠️ Stress data may not be fully compatible with Garmin Connect
-- ⚠️ Some Fitbit-specific metrics don't have Garmin equivalents
-- ⚠️ Time zones may need manual adjustment
-- ⚠️ Historical heart rate zones use estimated max HR (unless actual max HR is recorded)
+- ⚠️ GPS tracks not included in Takeout — use `fetch-gps` to download them
+- ⚠️ HRV FIT file stores daily RMSSD, not raw R-R intervals
+- ⚠️ Some Fitbit-specific metrics have no Garmin equivalent and are CSV-only
 
 ## Troubleshooting
 
 ### Common Issues
 
+**"GPS data missing from activities"**
+- GPS is not included in Google Takeout exports — it must be downloaded separately
+- Run `fitbit2garmin fetch-gps path/to/Takeout --token <token>` then re-run `convert`
+- See [Get a Fitbit Access Token](#2-optional-download-gps-tracks-from-fitbit-api) above
+
+**"HTTP 403 when running fetch-gps"**
+- Your OAuth token was generated with only the `activity` scope
+- GPS download requires **both** `activity` and `location` scopes
+- Generate a new token using the URL shown in `fitbit2garmin fetch-gps --help`
+
+**"Activities show as 'Other' in Garmin Connect"**
+- TCX format limitation — TCX only supports Running, Walking, Biking, Swimming, and Other
+- **Solution**: Import the `.fit` files instead
+- Run `fitbit2garmin debug-activities path/to/Takeout` to see which activities need FIT format
+
+**"Distance looks wrong for cycling/walking"**
+- Distance comes from the Fitbit JSON activity record; if absent it falls back to GPS-derived distance
+- Activities without GPS and without a JSON distance field will show no distance in Garmin Connect
+
 **"Fitbit data not found"**
 - Ensure you've extracted the Google Takeout archive
 - Check that the path contains a `Fitbit/` directory inside the Takeout folder
 
-**"No data found to convert"**
-- Verify your Fitbit account had data in the export period
-- Check that JSON files exist in the Fitbit directory
-
 **"Import failed in Garmin Connect"**
 - Try uploading FIT files first (best compatibility)
-- Try uploading files in smaller batches
-- Ensure date formats match your Garmin Connect region settings
-
-**"Activities show as 'Other' in Garmin Connect"**
-- This is a TCX format limitation — TCX only supports Running, Walking, Biking, Swimming, and Other
-- **Solution**: Import the `.fit` files instead of `.tcx` files — FIT carries the correct sport type for all 30+ activity types (Tennis, Basketball, Soccer, Golf, Rowing, Boxing, etc.)
-- Run `fitbit2garmin debug-activities path/to/Takeout` to see which activities need FIT format
-- The convert command also prints a summary of activities that require FIT format
-
-**"GPS data missing from activities"**
-- GPS is stored by Fitbit in separate `.tcx` files under `Activities/` in your Takeout export
-- The tool automatically matches and extracts GPS from these files
-- If an activity still lacks GPS, the original Fitbit recording may not have had GPS enabled
-
-**"Distance looks wrong"**
-- Fitbit exports distance in the account's locale unit (miles for US accounts, km for others)
-- The tool automatically detects the unit and normalizes to km
+- Upload files in smaller batches if bulk upload fails
 
 **"Heart rate zones seem incorrect"**
-- Review the `fitbit_heart_rate_zones.csv` file for zone calculations
 - Tool estimates max HR from age if not recorded in your data
 - Consider manually setting heart rate zones in Garmin Connect if needed
 
@@ -254,8 +311,9 @@ These files cannot be imported into Garmin Connect — Garmin Connect has no CSV
 fitbit2garmin/
 ├── models.py             # Pydantic data models and enums
 ├── parser.py             # Fitbit JSON parser; GPS extraction from Activities/ TCX files
-├── converter.py          # TCX, GPX, and FIT file generation
+├── converter.py          # TCX, GPX, FIT activity files + health data FIT files
 ├── exporter.py           # CSV exporters (Pandas-based)
+├── gps_fetcher.py        # Fitbit API GPS downloader (fetch-gps command)
 ├── heart_rate_zones.py   # Heart rate zone calculations (Tanaka, Fox, Gellish, Nes)
 ├── cli.py                # Click CLI commands
 ├── utils.py              # Parallel processing and resume manager
