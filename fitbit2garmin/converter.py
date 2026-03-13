@@ -1262,15 +1262,19 @@ class DataConverter:
         logger.info(f"Wrote {added} sleep stage records to {out_path} (skipped {skipped})")
         return str(out_path)
 
-    def convert_spo2_to_fit(self, spo2_data: List) -> Optional[str]:
-        """Generate spo2.fit from SpO2Data records (ACTIVITY file).
+    def convert_spo2_to_fit(self, spo2_data: List) -> List[str]:
+        """Generate spo2.fit (+ spo2_2.fit, …) from SpO2Data records (ACTIVITY file).
 
         Each daily SpO2 reading becomes a RecordMessage with
         saturated_hemoglobin_percent at noon UTC.
-        Returns output path or None.
+
+        ActivityMessage.num_sessions is a UINT16 (max 65535).  Large datasets are
+        split across multiple files of at most 65535 entries each.
+
+        Returns a list of output file paths (empty list on error / no data).
         """
         if not spo2_data:
-            return None
+            return []
 
         try:
             from fit_tool.fit_file_builder import FitFileBuilder
@@ -1285,92 +1289,112 @@ class DataConverter:
             )
         except ImportError:
             logger.warning("fit-tool not available; skipping spo2 FIT export")
-            return None
+            return []
 
         from datetime import timezone as _tz
 
-        valid = [e for e in spo2_data if e.spo2_percentage is not None]
+        valid = sorted(
+            [e for e in spo2_data if e.spo2_percentage is not None],
+            key=lambda e: e.date,
+        )
         if not valid:
-            return None
+            return []
 
-        builder = FitFileBuilder(auto_define=True, min_string_size=50)
-        now_ms = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
+        _CHUNK_SIZE = 65535   # ActivityMessage.num_sessions is UINT16
 
-        file_id = FileIdMessage()
-        file_id.type = FileType.ACTIVITY
-        file_id.manufacturer = Manufacturer.DEVELOPMENT
-        file_id.time_created = now_ms
-        builder.add(file_id)
+        out_paths: List[str] = []
+        chunks = [valid[i:i + _CHUNK_SIZE] for i in range(0, len(valid), _CHUNK_SIZE)]
 
-        for entry in sorted(valid, key=lambda e: e.date):
-            if entry.timestamp is not None:
-                ts_dt = entry.timestamp
-                if ts_dt.tzinfo is None:
-                    ts_dt = ts_dt.replace(tzinfo=_tz.utc)
-                ts_ms = int(ts_dt.timestamp() * 1000)
-            else:
-                ts_ms = int(
+        for chunk_idx, chunk in enumerate(chunks):
+            now_ms = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
+            builder = FitFileBuilder(auto_define=True, min_string_size=50)
+
+            file_id = FileIdMessage()
+            file_id.type = FileType.ACTIVITY
+            file_id.manufacturer = Manufacturer.DEVELOPMENT
+            file_id.time_created = now_ms
+            builder.add(file_id)
+
+            for entry in chunk:
+                if entry.timestamp is not None:
+                    ts_dt = entry.timestamp
+                    if ts_dt.tzinfo is None:
+                        ts_dt = ts_dt.replace(tzinfo=_tz.utc)
+                    ts_ms = int(ts_dt.timestamp() * 1000)
+                else:
+                    ts_ms = int(
+                        datetime(entry.date.year, entry.date.month, entry.date.day,
+                                 12, 0, 0, tzinfo=_tz.utc).timestamp() * 1000
+                    )
+
+                day_start_ms = int(
                     datetime(entry.date.year, entry.date.month, entry.date.day,
-                             12, 0, 0, tzinfo=_tz.utc).timestamp() * 1000
+                             0, 0, 0, tzinfo=_tz.utc).timestamp() * 1000
                 )
 
-            day_start_ms = int(
-                datetime(entry.date.year, entry.date.month, entry.date.day,
-                         0, 0, 0, tzinfo=_tz.utc).timestamp() * 1000
+                ev_start = EventMessage()
+                ev_start.timestamp = day_start_ms
+                ev_start.event = Event.TIMER
+                ev_start.event_type = EventType.START
+                builder.add(ev_start)
+
+                rec = RecordMessage()
+                rec.timestamp = ts_ms
+                rec.saturated_hemoglobin_percent = float(entry.spo2_percentage)
+                builder.add(rec)
+
+                ev_stop = EventMessage()
+                ev_stop.timestamp = ts_ms + 1000
+                ev_stop.event = Event.TIMER
+                ev_stop.event_type = EventType.STOP_ALL
+                builder.add(ev_stop)
+
+                lap = LapMessage()
+                lap.timestamp = ts_ms
+                lap.start_time = day_start_ms
+                lap.total_elapsed_time = (ts_ms - day_start_ms) / 1000.0
+                builder.add(lap)
+
+                session = SessionMessage()
+                session.timestamp = ts_ms
+                session.start_time = day_start_ms
+                session.sport = Sport.GENERIC
+                session.sub_sport = SubSport.GENERIC
+                session.total_elapsed_time = (ts_ms - day_start_ms) / 1000.0
+                session.num_laps = 1
+                builder.add(session)
+
+            act = ActivityMessage()
+            act.timestamp = now_ms
+            act.num_sessions = len(chunk)   # ≤ 65535 per chunk
+            act.total_timer_time = 0.0
+            builder.add(act)
+
+            suffix = "" if chunk_idx == 0 else f"_{chunk_idx + 1}"
+            out_path = self.output_dir / f"spo2{suffix}.fit"
+            builder.build().to_file(str(out_path))
+            out_paths.append(str(out_path))
+            logger.info(
+                f"Wrote {len(chunk)} SpO2 records to {out_path} "
+                f"(chunk {chunk_idx + 1}/{len(chunks)})"
             )
 
-            ev_start = EventMessage()
-            ev_start.timestamp = day_start_ms
-            ev_start.event = Event.TIMER
-            ev_start.event_type = EventType.START
-            builder.add(ev_start)
+        return out_paths
 
-            rec = RecordMessage()
-            rec.timestamp = ts_ms
-            rec.saturated_hemoglobin_percent = float(entry.spo2_percentage)
-            builder.add(rec)
-
-            ev_stop = EventMessage()
-            ev_stop.timestamp = ts_ms + 1000
-            ev_stop.event = Event.TIMER
-            ev_stop.event_type = EventType.STOP_ALL
-            builder.add(ev_stop)
-
-            lap = LapMessage()
-            lap.timestamp = ts_ms
-            lap.start_time = day_start_ms
-            lap.total_elapsed_time = (ts_ms - day_start_ms) / 1000.0
-            builder.add(lap)
-
-            session = SessionMessage()
-            session.timestamp = ts_ms
-            session.start_time = day_start_ms
-            session.sport = Sport.GENERIC
-            session.sub_sport = SubSport.GENERIC
-            session.total_elapsed_time = (ts_ms - day_start_ms) / 1000.0
-            session.num_laps = 1
-            builder.add(session)
-
-        act = ActivityMessage()
-        act.timestamp = now_ms
-        act.num_sessions = len(valid)
-        act.total_timer_time = 0.0
-        builder.add(act)
-
-        out_path = self.output_dir / "spo2.fit"
-        builder.build().to_file(str(out_path))
-        logger.info(f"Wrote {len(valid)} SpO2 records to {out_path}")
-        return str(out_path)
-
-    def convert_hrv_to_fit(self, hrv_data: List) -> Optional[str]:
-        """Generate hrv.fit from HeartRateVariability records (ACTIVITY file).
+    def convert_hrv_to_fit(self, hrv_data: List) -> List[str]:
+        """Generate hrv.fit (+ hrv_2.fit, hrv_3.fit, …) from HeartRateVariability records.
 
         Daily RMSSD (ms) is stored in HrvMessage.time as a single-element list
         [rmssd_ms / 1000.0] (seconds), which is the FIT HRV field's native unit.
-        Returns output path or None.
+
+        ActivityMessage.num_sessions is a UINT16 (max 65535).  When the dataset
+        has more records than that, the data is split across multiple files of at
+        most 65535 entries each.
+
+        Returns a list of output file paths (empty list on error / no data).
         """
         if not hrv_data:
-            return None
+            return []
 
         try:
             from fit_tool.fit_file_builder import FitFileBuilder
@@ -1385,78 +1409,93 @@ class DataConverter:
             )
         except ImportError:
             logger.warning("fit-tool not available; skipping HRV FIT export")
-            return None
+            return []
 
         from datetime import timezone as _tz
 
-        valid = [e for e in hrv_data if e.rmssd is not None and e.rmssd > 0]
+        valid = sorted(
+            [e for e in hrv_data if e.rmssd is not None and e.rmssd > 0],
+            key=lambda e: e.date,
+        )
         if not valid:
-            return None
+            return []
 
-        builder = FitFileBuilder(auto_define=True, min_string_size=50)
-        now_ms = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
+        _CHUNK_SIZE = 65535   # ActivityMessage.num_sessions is UINT16
 
-        file_id = FileIdMessage()
-        file_id.type = FileType.ACTIVITY
-        file_id.manufacturer = Manufacturer.DEVELOPMENT
-        file_id.time_created = now_ms
-        builder.add(file_id)
+        out_paths: List[str] = []
+        chunks = [valid[i:i + _CHUNK_SIZE] for i in range(0, len(valid), _CHUNK_SIZE)]
 
-        for entry in sorted(valid, key=lambda e: e.date):
-            if entry.timestamp is not None:
-                ts_dt = entry.timestamp
-                if ts_dt.tzinfo is None:
-                    ts_dt = ts_dt.replace(tzinfo=_tz.utc)
-                ts_ms = int(ts_dt.timestamp() * 1000)
-            else:
-                # Morning measurement at 06:00 UTC
-                ts_ms = int(
-                    datetime(entry.date.year, entry.date.month, entry.date.day,
-                             6, 0, 0, tzinfo=_tz.utc).timestamp() * 1000
-                )
+        for chunk_idx, chunk in enumerate(chunks):
+            now_ms = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
+            builder = FitFileBuilder(auto_define=True, min_string_size=50)
 
-            ev_start = EventMessage()
-            ev_start.timestamp = ts_ms
-            ev_start.event = Event.TIMER
-            ev_start.event_type = EventType.START
-            builder.add(ev_start)
+            file_id = FileIdMessage()
+            file_id.type = FileType.ACTIVITY
+            file_id.manufacturer = Manufacturer.DEVELOPMENT
+            file_id.time_created = now_ms
+            builder.add(file_id)
 
-            hrv_msg = HrvMessage()
-            # Store RMSSD (ms) as seconds — FIT HRV time field unit is seconds
-            hrv_msg.time = [entry.rmssd / 1000.0]
-            builder.add(hrv_msg)
+            for entry in chunk:
+                if entry.timestamp is not None:
+                    ts_dt = entry.timestamp
+                    if ts_dt.tzinfo is None:
+                        ts_dt = ts_dt.replace(tzinfo=_tz.utc)
+                    ts_ms = int(ts_dt.timestamp() * 1000)
+                else:
+                    # Morning measurement at 06:00 UTC
+                    ts_ms = int(
+                        datetime(entry.date.year, entry.date.month, entry.date.day,
+                                 6, 0, 0, tzinfo=_tz.utc).timestamp() * 1000
+                    )
 
-            ev_stop = EventMessage()
-            ev_stop.timestamp = ts_ms + 1000
-            ev_stop.event = Event.TIMER
-            ev_stop.event_type = EventType.STOP_ALL
-            builder.add(ev_stop)
+                ev_start = EventMessage()
+                ev_start.timestamp = ts_ms
+                ev_start.event = Event.TIMER
+                ev_start.event_type = EventType.START
+                builder.add(ev_start)
 
-            lap = LapMessage()
-            lap.timestamp = ts_ms
-            lap.start_time = ts_ms
-            lap.total_elapsed_time = 1.0
-            builder.add(lap)
+                hrv_msg = HrvMessage()
+                # Store RMSSD (ms) as seconds — FIT HRV time field unit is seconds
+                hrv_msg.time = [entry.rmssd / 1000.0]
+                builder.add(hrv_msg)
 
-            session = SessionMessage()
-            session.timestamp = ts_ms
-            session.start_time = ts_ms
-            session.sport = Sport.GENERIC
-            session.sub_sport = SubSport.GENERIC
-            session.total_elapsed_time = 1.0
-            session.num_laps = 1
-            builder.add(session)
+                ev_stop = EventMessage()
+                ev_stop.timestamp = ts_ms + 1000
+                ev_stop.event = Event.TIMER
+                ev_stop.event_type = EventType.STOP_ALL
+                builder.add(ev_stop)
 
-        act = ActivityMessage()
-        act.timestamp = now_ms
-        act.num_sessions = len(valid)
-        act.total_timer_time = 0.0
-        builder.add(act)
+                lap = LapMessage()
+                lap.timestamp = ts_ms
+                lap.start_time = ts_ms
+                lap.total_elapsed_time = 1.0
+                builder.add(lap)
 
-        out_path = self.output_dir / "hrv.fit"
-        builder.build().to_file(str(out_path))
-        logger.info(f"Wrote {len(valid)} HRV records to {out_path}")
-        return str(out_path)
+                session = SessionMessage()
+                session.timestamp = ts_ms
+                session.start_time = ts_ms
+                session.sport = Sport.GENERIC
+                session.sub_sport = SubSport.GENERIC
+                session.total_elapsed_time = 1.0
+                session.num_laps = 1
+                builder.add(session)
+
+            act = ActivityMessage()
+            act.timestamp = now_ms
+            act.num_sessions = len(chunk)   # ≤ 65535 per chunk
+            act.total_timer_time = 0.0
+            builder.add(act)
+
+            suffix = "" if chunk_idx == 0 else f"_{chunk_idx + 1}"
+            out_path = self.output_dir / f"hrv{suffix}.fit"
+            builder.build().to_file(str(out_path))
+            out_paths.append(str(out_path))
+            logger.info(
+                f"Wrote {len(chunk)} HRV records to {out_path} "
+                f"(chunk {chunk_idx + 1}/{len(chunks)})"
+            )
+
+        return out_paths
 
     def convert_body_composition_to_fit(
         self,

@@ -323,10 +323,13 @@ def convert(
                     click.echo(
                         f"🩸 Exporting {valid_spo2} SpO2 records to spo2.fit..."
                     )
-                    spo2_fit = converter.convert_spo2_to_fit(user_data.spo2_data)
-                    if spo2_fit:
-                        exported_files.append(spo2_fit)
-                        click.echo(f"   ✅ spo2.fit written")
+                    spo2_fits = converter.convert_spo2_to_fit(user_data.spo2_data)
+                    if spo2_fits:
+                        exported_files.extend(spo2_fits)
+                        if len(spo2_fits) == 1:
+                            click.echo(f"   ✅ spo2.fit written")
+                        else:
+                            click.echo(f"   ✅ {len(spo2_fits)} spo2 files written ({', '.join(Path(f).name for f in spo2_fits)})")
 
             # HRV FIT file
             if "fit" in export_formats and user_data.heart_rate_variability:
@@ -338,10 +341,13 @@ def convert(
                     click.echo(
                         f"💓 Exporting {valid_hrv} HRV records to hrv.fit..."
                     )
-                    hrv_fit = converter.convert_hrv_to_fit(user_data.heart_rate_variability)
-                    if hrv_fit:
-                        exported_files.append(hrv_fit)
-                        click.echo(f"   ✅ hrv.fit written")
+                    hrv_fits = converter.convert_hrv_to_fit(user_data.heart_rate_variability)
+                    if hrv_fits:
+                        exported_files.extend(hrv_fits)
+                        if len(hrv_fits) == 1:
+                            click.echo(f"   ✅ hrv.fit written")
+                        else:
+                            click.echo(f"   ✅ {len(hrv_fits)} hrv files written ({', '.join(Path(f).name for f in hrv_fits)})")
 
         # FIT exports are now handled in the activity/weight/steps/sleep/spo2/hrv conversion above
 

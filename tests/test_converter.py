@@ -292,9 +292,9 @@ class TestHrvFit:
         from fit_tool.profile.messages.hrv_message import HrvMessage
         rmssd_ms = 55.0
         entry = self._make_entry(rmssd_ms=rmssd_ms)
-        path = converter.convert_hrv_to_fit([entry])
-        assert path is not None
-        msgs = _msgs_of_type(_read_fit(path), HrvMessage)
+        paths = converter.convert_hrv_to_fit([entry])
+        assert paths
+        msgs = _msgs_of_type(_read_fit(paths[0]), HrvMessage)
         assert len(msgs) == 1
         # time is stored as a list; first element is rmssd in seconds
         stored_s = msgs[0].time[0]
@@ -308,8 +308,8 @@ class TestHrvFit:
             self._make_entry(rmssd_ms=45.0, d=date(2024, 1, 2)),
             self._make_entry(rmssd_ms=60.0, d=date(2024, 1, 3)),
         ]
-        path = converter.convert_hrv_to_fit(entries)
-        msgs = _msgs_of_type(_read_fit(path), HrvMessage)
+        paths = converter.convert_hrv_to_fit(entries)
+        msgs = _msgs_of_type(_read_fit(paths[0]), HrvMessage)
         assert len(msgs) == 3
         stored = [m.time[0] * 1000.0 for m in msgs]
         assert abs(stored[0] - 30.0) < 1.0
@@ -321,8 +321,8 @@ class TestHrvFit:
         from fit_tool.profile.messages.event_message import EventMessage
         ts = datetime(2024, 5, 1, 8, 30, 0, tzinfo=_tz.utc)
         entry = self._make_entry(rmssd_ms=40.0, ts=ts)
-        path = converter.convert_hrv_to_fit([entry])
-        msgs = _read_fit(path)
+        paths = converter.convert_hrv_to_fit([entry])
+        msgs = _read_fit(paths[0])
         events = _msgs_of_type(msgs, EventMessage)
         expected_ms = int(ts.timestamp() * 1000)
         # Timer-start event should have the expected timestamp (within 1 second)
@@ -337,20 +337,20 @@ class TestHrvFit:
             HeartRateVariability(date=date(2024, 1, 2), rmssd=None),
             self._make_entry(rmssd_ms=38.0, d=date(2024, 1, 3)),
         ]
-        path = converter.convert_hrv_to_fit(entries)
-        assert path is not None
-        msgs = _msgs_of_type(_read_fit(path), HrvMessage)
+        paths = converter.convert_hrv_to_fit(entries)
+        assert paths
+        msgs = _msgs_of_type(_read_fit(paths[0]), HrvMessage)
         assert len(msgs) == 1
         assert abs(msgs[0].time[0] * 1000.0 - 38.0) < 1.0
 
-    def test_all_invalid_returns_none(self, converter):
+    def test_all_invalid_returns_empty(self, converter):
         entries = [
             HeartRateVariability(date=date(2024, 1, 1), rmssd=None),
         ]
-        assert converter.convert_hrv_to_fit(entries) is None
+        assert not converter.convert_hrv_to_fit(entries)
 
-    def test_empty_returns_none(self, converter):
-        assert converter.convert_hrv_to_fit([]) is None
+    def test_empty_returns_empty(self, converter):
+        assert not converter.convert_hrv_to_fit([])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -367,9 +367,9 @@ class TestSpO2Fit:
         """SpO2 % is written and read back within 0.2 % (scale=10 encoding)."""
         from fit_tool.profile.messages.record_message import RecordMessage
         entry = self._make_entry(pct=96.0)
-        path = converter.convert_spo2_to_fit([entry])
-        assert path is not None
-        msgs = _msgs_of_type(_read_fit(path), RecordMessage)
+        paths = converter.convert_spo2_to_fit([entry])
+        assert paths
+        msgs = _msgs_of_type(_read_fit(paths[0]), RecordMessage)
         assert len(msgs) >= 1
         assert abs(msgs[0].saturated_hemoglobin_percent - 96.0) < 0.2
 
@@ -381,8 +381,8 @@ class TestSpO2Fit:
             self._make_entry(pct=97.0, d=date(2024, 1, 2)),
             self._make_entry(pct=98.0, d=date(2024, 1, 3)),
         ]
-        path = converter.convert_spo2_to_fit(entries)
-        msgs = _msgs_of_type(_read_fit(path), RecordMessage)
+        paths = converter.convert_spo2_to_fit(entries)
+        msgs = _msgs_of_type(_read_fit(paths[0]), RecordMessage)
         assert len(msgs) == 3
 
     def test_spo2_values_match_input_order(self, converter):
@@ -393,8 +393,8 @@ class TestSpO2Fit:
             self._make_entry(pct=96.0, d=date(2024, 1, 1)),
             self._make_entry(pct=97.0, d=date(2024, 1, 2)),
         ]
-        path = converter.convert_spo2_to_fit(entries)
-        msgs = _msgs_of_type(_read_fit(path), RecordMessage)
+        paths = converter.convert_spo2_to_fit(entries)
+        msgs = _msgs_of_type(_read_fit(paths[0]), RecordMessage)
         values = [m.saturated_hemoglobin_percent for m in msgs]
         # Should be sorted by date: 96, 97, 98
         assert abs(values[0] - 96.0) < 0.2
@@ -408,13 +408,13 @@ class TestSpO2Fit:
             SpO2Data(date=date(2024, 1, 1), spo2_percentage=None),
             self._make_entry(pct=95.5, d=date(2024, 1, 2)),
         ]
-        path = converter.convert_spo2_to_fit(entries)
-        msgs = _msgs_of_type(_read_fit(path), RecordMessage)
+        paths = converter.convert_spo2_to_fit(entries)
+        msgs = _msgs_of_type(_read_fit(paths[0]), RecordMessage)
         assert len(msgs) == 1
         assert abs(msgs[0].saturated_hemoglobin_percent - 95.5) < 0.2
 
-    def test_empty_returns_none(self, converter):
-        assert converter.convert_spo2_to_fit([]) is None
+    def test_empty_returns_empty(self, converter):
+        assert not converter.convert_spo2_to_fit([])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -909,8 +909,8 @@ class TestEdgeCases:
         """Single HRV entry produces exactly one HrvMessage."""
         from fit_tool.profile.messages.hrv_message import HrvMessage
         entry = HeartRateVariability(date=date(2024, 9, 15), rmssd=48.3)
-        path = converter.convert_hrv_to_fit([entry])
-        msgs = _msgs_of_type(_read_fit(path), HrvMessage)
+        paths = converter.convert_hrv_to_fit([entry])
+        msgs = _msgs_of_type(_read_fit(paths[0]), HrvMessage)
         assert len(msgs) == 1
         assert abs(msgs[0].time[0] * 1000.0 - 48.3) < 1.0
 
