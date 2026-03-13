@@ -541,7 +541,7 @@ class DataConverter:
           total_descent              — sum of elevation drops (metres)
           max_speed, avg_speed       — m/s from speed field when present
         """
-        lats, lons, alts, speeds = [], [], [], []
+        lats, lons, alts, speeds, distances = [], [], [], [], []
         for p in gps_data:
             if not isinstance(p, dict):
                 continue
@@ -553,6 +553,8 @@ class DataConverter:
                 alts.append(float(p["altitude"]))
             if "speed" in p:
                 speeds.append(float(p["speed"]))
+            if "distance" in p:
+                distances.append(float(p["distance"]))
 
         stats = {}
         if lats and lons:
@@ -567,6 +569,13 @@ class DataConverter:
             stats["avg_altitude"] = sum(alts) / len(alts)
             stats["max_altitude"] = max(alts)
             stats["min_altitude"] = min(alts)
+            total_ascent = sum(
+                alts[i] - alts[i - 1]
+                for i in range(1, len(alts))
+                if alts[i] > alts[i - 1]
+            )
+            if total_ascent > 0:
+                stats["total_ascent"] = total_ascent
             total_descent = sum(
                 alts[i - 1] - alts[i]
                 for i in range(1, len(alts))
@@ -579,6 +588,13 @@ class DataConverter:
             stats["max_speed"] = max(speeds)
             stats["avg_speed"] = sum(speeds) / len(speeds)
 
+        # Total distance: take the maximum cumulative distance value from GPS points
+        # (GPS points have a cumulative "distance" field in metres from TCX parsing)
+        if distances:
+            gps_total = max(distances)
+            if gps_total > 0:
+                stats["total_distance"] = gps_total
+
         return stats
 
     def _apply_gps_stats_to_message(self, msg, gps_stats: dict, avg_speed_fallback=None):
@@ -590,6 +606,8 @@ class DataConverter:
             msg.avg_altitude = gps_stats["avg_altitude"]
             msg.max_altitude = gps_stats["max_altitude"]
             msg.min_altitude = gps_stats["min_altitude"]
+        if gps_stats.get("total_ascent") is not None:
+            msg.total_ascent = gps_stats["total_ascent"]
         if gps_stats.get("total_descent") is not None:
             msg.total_descent = gps_stats["total_descent"]
         if gps_stats.get("max_speed") is not None:
@@ -663,8 +681,10 @@ class DataConverter:
             # avg_speed from Fitbit field (km/h → m/s), or derived from distance/time
             if activity.speed:
                 avg_speed_ms = activity.speed / 3.6
-            elif activity.distance and activity.duration_ms:
+            elif activity.distance is not None and activity.distance > 0 and activity.duration_ms:
                 avg_speed_ms = (activity.distance * 1000) / (activity.duration_ms / 1000)
+            elif gps_stats.get("total_distance") and activity.duration_ms:
+                avg_speed_ms = gps_stats["total_distance"] / (activity.duration_ms / 1000)
             else:
                 avg_speed_ms = None
 
@@ -703,6 +723,14 @@ class DataConverter:
             builder.add(stop_evt)
 
             # ── Lap ──────────────────────────────────────────────────────────
+            # Effective total distance: prefer Fitbit activity field; fall back to GPS-derived
+            if activity.distance is not None and activity.distance > 0:
+                effective_distance_m = activity.distance * 1000  # km → m
+            elif gps_stats.get("total_distance"):
+                effective_distance_m = gps_stats["total_distance"]  # already metres
+            else:
+                effective_distance_m = None
+
             lap = LapMessage()
             lap.sport = sport
             lap.sub_sport = sub_sport
@@ -710,8 +738,16 @@ class DataConverter:
             lap.timestamp = end_ms
             lap.total_elapsed_time = activity.duration_ms / 1000
             lap.total_timer_time = timer_time
-            if activity.distance:
-                lap.total_distance = activity.distance * 1000
+            # Effective elevation: prefer Fitbit JSON (barometric altimeter, accurate)
+            # over GPS-computed (noisy). Fall back to GPS if JSON doesn't have it.
+            effective_ascent_m: Optional[float] = None
+            if activity.elevation_gain is not None and activity.elevation_gain > 0:
+                effective_ascent_m = float(activity.elevation_gain)  # metres (Fitbit stores in m)
+            elif gps_stats.get("total_ascent"):
+                effective_ascent_m = gps_stats["total_ascent"]
+
+            if effective_distance_m is not None:
+                lap.total_distance = effective_distance_m
             if activity.calories:
                 lap.total_calories = activity.calories
             if activity.steps:
@@ -722,15 +758,19 @@ class DataConverter:
                 lap.max_heart_rate = activity.max_heart_rate
             if activity.min_heart_rate:
                 lap.min_heart_rate = activity.min_heart_rate
-            if activity.elevation_gain:
-                lap.total_ascent = activity.elevation_gain
+            if effective_ascent_m is not None:
+                lap.total_ascent = effective_ascent_m
             if avg_cadence is not None:
                 lap.avg_running_cadence = avg_cadence
             if total_strides is not None:
                 lap.total_strides = total_strides
             if zone_times:
                 lap.time_in_hr_zone = zone_times
+            # GPS-derived stats (avg/max speed, altitude, descent, start position)
+            # Pass None for total_ascent so _apply_gps_stats doesn't overwrite our choice
             self._apply_gps_stats_to_message(lap, gps_stats, avg_speed_ms)
+            if effective_ascent_m is not None:
+                lap.total_ascent = effective_ascent_m  # Re-apply — _apply_gps_stats may override
             # Add GPS start/end positions to lap
             if gps_stats.get("start_lat") is not None:
                 lap.start_position_lat = gps_stats["start_lat"]
@@ -755,8 +795,8 @@ class DataConverter:
             session.total_elapsed_time = activity.duration_ms / 1000
             session.total_timer_time = timer_time
             session.num_laps = 1
-            if activity.distance:
-                session.total_distance = activity.distance * 1000
+            if effective_distance_m is not None:
+                session.total_distance = effective_distance_m
             if activity.calories:
                 session.total_calories = activity.calories
             if activity.steps:
@@ -767,8 +807,8 @@ class DataConverter:
                 session.max_heart_rate = activity.max_heart_rate
             if activity.min_heart_rate:
                 session.min_heart_rate = activity.min_heart_rate
-            if activity.elevation_gain:
-                session.total_ascent = activity.elevation_gain
+            if effective_ascent_m is not None:
+                session.total_ascent = effective_ascent_m
             if avg_cadence is not None:
                 session.avg_running_cadence = avg_cadence
             if total_strides is not None:
@@ -781,6 +821,8 @@ class DataConverter:
                 session.swc_lat = gps_stats["swc_lat"]
                 session.swc_long = gps_stats["swc_long"]
             self._apply_gps_stats_to_message(session, gps_stats, avg_speed_ms)
+            if effective_ascent_m is not None:
+                session.total_ascent = effective_ascent_m  # Re-apply after GPS stats
             builder.add(session)
 
             # ── Activity ─────────────────────────────────────────────────────
@@ -899,15 +941,26 @@ class DataConverter:
 
                 record = RecordMessage()
 
-                # fit-tool expects Unix milliseconds for all timestamps
+                # fit-tool expects Unix milliseconds for all timestamps.
+                # If the GPS time string has no timezone (naive), fall back to
+                # offset-based timing so records stay within the session window.
+                point_ms = None
                 if "time" in gps_point:
                     try:
                         from dateutil.parser import parse as _parse_dt
-                        point_ms = int(_parse_dt(gps_point["time"]).timestamp() * 1000)
+                        parsed_t = _parse_dt(gps_point["time"])
+                        if parsed_t.tzinfo is not None:
+                            # Timezone-aware: safe to use directly
+                            point_ms = int(parsed_t.timestamp() * 1000)
+                        else:
+                            # Timezone-naive: assume UTC (Fitbit TCX uses UTC with Z)
+                            from datetime import timezone as _tz
+                            point_ms = int(
+                                parsed_t.replace(tzinfo=_tz.utc).timestamp() * 1000
+                            )
                     except Exception:
-                        point_time = activity.start_time + timedelta(seconds=i * time_interval)
-                        point_ms = int(point_time.timestamp() * 1000)
-                else:
+                        pass
+                if point_ms is None:
                     point_time = activity.start_time + timedelta(seconds=i * time_interval)
                     point_ms = int(point_time.timestamp() * 1000)
                 record.timestamp = point_ms
@@ -1045,56 +1098,556 @@ class DataConverter:
 
         return c * r
 
+    def convert_sleep_to_fit(self, sleep_data: List) -> Optional[str]:
+        """Generate sleep.fit from SleepData records (MONITORING_B file).
+
+        Each sleep stage segment becomes a MonitoringMessage with:
+          activity_type=SEDENTARY, activity_level encoding the stage.
+        Returns output path or None.
+        """
+        if not sleep_data:
+            return None
+
+        try:
+            from fit_tool.fit_file_builder import FitFileBuilder
+            from fit_tool.profile.messages.file_id_message import FileIdMessage
+            from fit_tool.profile.messages.monitoring_info_message import MonitoringInfoMessage
+            from fit_tool.profile.messages.monitoring_message import MonitoringMessage
+            from fit_tool.profile.profile_type import (
+                FileType, Manufacturer, ActivityType as FitActivityType, ActivityLevel,
+            )
+        except ImportError:
+            logger.warning("fit-tool not available; skipping sleep FIT export")
+            return None
+
+        from datetime import timezone as _tz
+
+        FIT_EPOCH_MS = 631065600000
+
+        # Map Fitbit stage names → ActivityLevel
+        STAGE_TO_LEVEL = {
+            "deep":    ActivityLevel.LOW,
+            "light":   ActivityLevel.MEDIUM,
+            "rem":     ActivityLevel.MEDIUM,
+            "wake":    ActivityLevel.HIGH,
+            "awake":   ActivityLevel.HIGH,
+            "asleep":  ActivityLevel.LOW,
+            "restless": ActivityLevel.MEDIUM,
+        }
+
+        builder = FitFileBuilder(auto_define=True, min_string_size=50)
+        now_ms = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
+
+        file_id = FileIdMessage()
+        file_id.type = FileType.MONITORING_B
+        file_id.manufacturer = Manufacturer.DEVELOPMENT
+        file_id.time_created = now_ms
+        builder.add(file_id)
+
+        info = MonitoringInfoMessage()
+        info.timestamp = now_ms
+        info.local_timestamp = (now_ms - FIT_EPOCH_MS) // 1000
+        info.activity_type = [FitActivityType.SEDENTARY]
+        builder.add(info)
+
+        added = skipped = 0
+
+        for entry in sorted(sleep_data, key=lambda e: e.start_time):
+            if entry.duration_ms <= 0:
+                skipped += 1
+                continue
+
+            stages = entry.sleep_stages  # list of {dateTime, level, seconds}
+
+            if stages:
+                for seg in stages:
+                    raw_dt = seg.get("dateTime", "")
+                    level_str = seg.get("level", "").lower()
+                    seg_secs = int(seg.get("seconds", 0))
+                    if not raw_dt or seg_secs <= 0:
+                        continue
+
+                    try:
+                        seg_start = datetime.fromisoformat(raw_dt)
+                        if seg_start.tzinfo is None:
+                            seg_start = seg_start.replace(tzinfo=_tz.utc)
+                    except Exception:
+                        continue
+
+                    seg_end_ms = int((seg_start.timestamp() + seg_secs) * 1000)
+
+                    msg = MonitoringMessage()
+                    msg.timestamp = seg_end_ms
+                    msg.activity_type = FitActivityType.SEDENTARY
+                    msg.active_time = float(seg_secs)
+                    act_level = STAGE_TO_LEVEL.get(level_str, ActivityLevel.MEDIUM)
+                    msg.activity_level = act_level
+                    if entry.heart_rate_avg:
+                        msg.heart_rate = int(entry.heart_rate_avg)
+                    builder.add(msg)
+                    added += 1
+            else:
+                # No stage detail — write one summary record for the whole session
+                end_ms = int(entry.end_time.timestamp() * 1000)
+                if entry.end_time.tzinfo is None:
+                    end_ms = int(entry.end_time.replace(tzinfo=_tz.utc).timestamp() * 1000)
+
+                msg = MonitoringMessage()
+                msg.timestamp = end_ms
+                msg.activity_type = FitActivityType.SEDENTARY
+                msg.active_time = float(entry.duration_ms / 1000)
+                msg.activity_level = ActivityLevel.LOW
+                if entry.heart_rate_avg:
+                    msg.heart_rate = int(entry.heart_rate_avg)
+                builder.add(msg)
+                added += 1
+
+        if added == 0:
+            logger.warning("No sleep records had usable data; skipping sleep.fit")
+            return None
+
+        out_path = self.output_dir / "sleep.fit"
+        builder.build().to_file(str(out_path))
+        logger.info(f"Wrote {added} sleep stage records to {out_path} (skipped {skipped})")
+        return str(out_path)
+
+    def convert_spo2_to_fit(self, spo2_data: List) -> Optional[str]:
+        """Generate spo2.fit from SpO2Data records (ACTIVITY file).
+
+        Each daily SpO2 reading becomes a RecordMessage with
+        saturated_hemoglobin_percent at noon UTC.
+        Returns output path or None.
+        """
+        if not spo2_data:
+            return None
+
+        try:
+            from fit_tool.fit_file_builder import FitFileBuilder
+            from fit_tool.profile.messages.file_id_message import FileIdMessage
+            from fit_tool.profile.messages.event_message import EventMessage
+            from fit_tool.profile.messages.record_message import RecordMessage
+            from fit_tool.profile.messages.lap_message import LapMessage
+            from fit_tool.profile.messages.session_message import SessionMessage
+            from fit_tool.profile.messages.activity_message import ActivityMessage
+            from fit_tool.profile.profile_type import (
+                FileType, Manufacturer, Event, EventType, Sport, SubSport,
+            )
+        except ImportError:
+            logger.warning("fit-tool not available; skipping spo2 FIT export")
+            return None
+
+        from datetime import timezone as _tz
+
+        valid = [e for e in spo2_data if e.spo2_percentage is not None]
+        if not valid:
+            return None
+
+        builder = FitFileBuilder(auto_define=True, min_string_size=50)
+        now_ms = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
+
+        file_id = FileIdMessage()
+        file_id.type = FileType.ACTIVITY
+        file_id.manufacturer = Manufacturer.DEVELOPMENT
+        file_id.time_created = now_ms
+        builder.add(file_id)
+
+        for entry in sorted(valid, key=lambda e: e.date):
+            if entry.timestamp is not None:
+                ts_dt = entry.timestamp
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=_tz.utc)
+                ts_ms = int(ts_dt.timestamp() * 1000)
+            else:
+                ts_ms = int(
+                    datetime(entry.date.year, entry.date.month, entry.date.day,
+                             12, 0, 0, tzinfo=_tz.utc).timestamp() * 1000
+                )
+
+            day_start_ms = int(
+                datetime(entry.date.year, entry.date.month, entry.date.day,
+                         0, 0, 0, tzinfo=_tz.utc).timestamp() * 1000
+            )
+
+            ev_start = EventMessage()
+            ev_start.timestamp = day_start_ms
+            ev_start.event = Event.TIMER
+            ev_start.event_type = EventType.START
+            builder.add(ev_start)
+
+            rec = RecordMessage()
+            rec.timestamp = ts_ms
+            rec.saturated_hemoglobin_percent = float(entry.spo2_percentage)
+            builder.add(rec)
+
+            ev_stop = EventMessage()
+            ev_stop.timestamp = ts_ms + 1000
+            ev_stop.event = Event.TIMER
+            ev_stop.event_type = EventType.STOP_ALL
+            builder.add(ev_stop)
+
+            lap = LapMessage()
+            lap.timestamp = ts_ms
+            lap.start_time = day_start_ms
+            lap.total_elapsed_time = (ts_ms - day_start_ms) / 1000.0
+            builder.add(lap)
+
+            session = SessionMessage()
+            session.timestamp = ts_ms
+            session.start_time = day_start_ms
+            session.sport = Sport.GENERIC
+            session.sub_sport = SubSport.GENERIC
+            session.total_elapsed_time = (ts_ms - day_start_ms) / 1000.0
+            session.num_laps = 1
+            builder.add(session)
+
+        act = ActivityMessage()
+        act.timestamp = now_ms
+        act.num_sessions = len(valid)
+        act.total_timer_time = 0.0
+        builder.add(act)
+
+        out_path = self.output_dir / "spo2.fit"
+        builder.build().to_file(str(out_path))
+        logger.info(f"Wrote {len(valid)} SpO2 records to {out_path}")
+        return str(out_path)
+
+    def convert_hrv_to_fit(self, hrv_data: List) -> Optional[str]:
+        """Generate hrv.fit from HeartRateVariability records (ACTIVITY file).
+
+        Daily RMSSD (ms) is stored in HrvMessage.time as a single-element list
+        [rmssd_ms / 1000.0] (seconds), which is the FIT HRV field's native unit.
+        Returns output path or None.
+        """
+        if not hrv_data:
+            return None
+
+        try:
+            from fit_tool.fit_file_builder import FitFileBuilder
+            from fit_tool.profile.messages.file_id_message import FileIdMessage
+            from fit_tool.profile.messages.event_message import EventMessage
+            from fit_tool.profile.messages.hrv_message import HrvMessage
+            from fit_tool.profile.messages.lap_message import LapMessage
+            from fit_tool.profile.messages.session_message import SessionMessage
+            from fit_tool.profile.messages.activity_message import ActivityMessage
+            from fit_tool.profile.profile_type import (
+                FileType, Manufacturer, Event, EventType, Sport, SubSport,
+            )
+        except ImportError:
+            logger.warning("fit-tool not available; skipping HRV FIT export")
+            return None
+
+        from datetime import timezone as _tz
+
+        valid = [e for e in hrv_data if e.rmssd is not None and e.rmssd > 0]
+        if not valid:
+            return None
+
+        builder = FitFileBuilder(auto_define=True, min_string_size=50)
+        now_ms = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
+
+        file_id = FileIdMessage()
+        file_id.type = FileType.ACTIVITY
+        file_id.manufacturer = Manufacturer.DEVELOPMENT
+        file_id.time_created = now_ms
+        builder.add(file_id)
+
+        for entry in sorted(valid, key=lambda e: e.date):
+            if entry.timestamp is not None:
+                ts_dt = entry.timestamp
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=_tz.utc)
+                ts_ms = int(ts_dt.timestamp() * 1000)
+            else:
+                # Morning measurement at 06:00 UTC
+                ts_ms = int(
+                    datetime(entry.date.year, entry.date.month, entry.date.day,
+                             6, 0, 0, tzinfo=_tz.utc).timestamp() * 1000
+                )
+
+            ev_start = EventMessage()
+            ev_start.timestamp = ts_ms
+            ev_start.event = Event.TIMER
+            ev_start.event_type = EventType.START
+            builder.add(ev_start)
+
+            hrv_msg = HrvMessage()
+            # Store RMSSD (ms) as seconds — FIT HRV time field unit is seconds
+            hrv_msg.time = [entry.rmssd / 1000.0]
+            builder.add(hrv_msg)
+
+            ev_stop = EventMessage()
+            ev_stop.timestamp = ts_ms + 1000
+            ev_stop.event = Event.TIMER
+            ev_stop.event_type = EventType.STOP_ALL
+            builder.add(ev_stop)
+
+            lap = LapMessage()
+            lap.timestamp = ts_ms
+            lap.start_time = ts_ms
+            lap.total_elapsed_time = 1.0
+            builder.add(lap)
+
+            session = SessionMessage()
+            session.timestamp = ts_ms
+            session.start_time = ts_ms
+            session.sport = Sport.GENERIC
+            session.sub_sport = SubSport.GENERIC
+            session.total_elapsed_time = 1.0
+            session.num_laps = 1
+            builder.add(session)
+
+        act = ActivityMessage()
+        act.timestamp = now_ms
+        act.num_sessions = len(valid)
+        act.total_timer_time = 0.0
+        builder.add(act)
+
+        out_path = self.output_dir / "hrv.fit"
+        builder.build().to_file(str(out_path))
+        logger.info(f"Wrote {len(valid)} HRV records to {out_path}")
+        return str(out_path)
+
+    def convert_body_composition_to_fit(
+        self,
+        body_composition: List,
+    ) -> Optional[str]:
+        """Generate a single weight.fit file from all BodyComposition records.
+
+        Returns the output file path, or None if no data / fit-tool unavailable.
+        """
+        if not body_composition:
+            return None
+
+        try:
+            from fit_tool.fit_file_builder import FitFileBuilder
+            from fit_tool.profile.messages.file_id_message import FileIdMessage
+            from fit_tool.profile.messages.weight_scale_message import WeightScaleMessage
+            from fit_tool.profile.profile_type import FileType, Manufacturer
+        except ImportError:
+            logger.warning("fit-tool not available; skipping weight FIT export")
+            return None
+
+        from datetime import timezone as _tz
+
+        builder = FitFileBuilder(auto_define=True, min_string_size=50)
+
+        file_id = FileIdMessage()
+        file_id.type = FileType.WEIGHT
+        file_id.manufacturer = Manufacturer.DEVELOPMENT
+        file_id.time_created = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
+        builder.add(file_id)
+
+        skipped = 0
+        added = 0
+        for entry in sorted(body_composition, key=lambda e: e.date):
+            if entry.weight is None or entry.weight <= 0:
+                skipped += 1
+                continue
+
+            # Convert date to a noon-UTC timestamp so Garmin Connect
+            # assigns the measurement to the correct calendar day.
+            dt = datetime(
+                entry.date.year, entry.date.month, entry.date.day,
+                12, 0, 0, tzinfo=_tz.utc,
+            )
+            ts_ms = int(dt.timestamp() * 1000)
+
+            ws = WeightScaleMessage()
+            ws.timestamp = ts_ms
+            ws.weight = float(entry.weight)  # kg
+
+            if entry.body_fat_percentage is not None:
+                ws.percent_fat = float(entry.body_fat_percentage)
+            if entry.water_percentage is not None:
+                ws.percent_hydration = float(entry.water_percentage)
+            if entry.muscle_mass is not None:
+                ws.muscle_mass = float(entry.muscle_mass)
+            if entry.bone_mass is not None:
+                ws.bone_mass = float(entry.bone_mass)
+
+            builder.add(ws)
+            added += 1
+
+        if added == 0:
+            logger.warning("No body composition records had valid weight data; skipping weight.fit")
+            return None
+
+        out_path = self.output_dir / "weight.fit"
+        fit_file = builder.build()
+        fit_file.to_file(str(out_path))
+        logger.info(f"Wrote {added} weight records to {out_path} (skipped {skipped})")
+        return str(out_path)
+
+    def convert_daily_steps_to_fit(
+        self,
+        daily_metrics: List,
+    ) -> Optional[str]:
+        """Generate a monitoring.fit file from DailyMetrics (steps, distance, calories).
+
+        Returns the output file path, or None if no data / fit-tool unavailable.
+        """
+        if not daily_metrics:
+            return None
+
+        try:
+            from fit_tool.fit_file_builder import FitFileBuilder
+            from fit_tool.profile.messages.file_id_message import FileIdMessage
+            from fit_tool.profile.messages.monitoring_info_message import MonitoringInfoMessage
+            from fit_tool.profile.messages.monitoring_message import MonitoringMessage
+            from fit_tool.profile.profile_type import FileType, Manufacturer
+            from fit_tool.profile.profile_type import ActivityType as FitActivityType
+        except ImportError:
+            logger.warning("fit-tool not available; skipping steps FIT export")
+            return None
+
+        from datetime import timezone as _tz
+
+        FIT_EPOCH_MS = 631065600000  # 1989-12-31 00:00:00 UTC in unix ms
+
+        builder = FitFileBuilder(auto_define=True, min_string_size=50)
+
+        now_ms = int(datetime.now(tz=_tz.utc).timestamp() * 1000)
+        file_id = FileIdMessage()
+        file_id.type = FileType.MONITORING_B
+        file_id.manufacturer = Manufacturer.DEVELOPMENT
+        file_id.time_created = now_ms
+        builder.add(file_id)
+
+        info = MonitoringInfoMessage()
+        info.timestamp = now_ms
+        info.local_timestamp = (now_ms - FIT_EPOCH_MS) // 1000
+        info.activity_type = [FitActivityType.WALKING]
+        builder.add(info)
+
+        skipped = 0
+        added = 0
+        for entry in sorted(daily_metrics, key=lambda e: e.date):
+            if entry.steps is None or entry.steps == 0:
+                skipped += 1
+                continue
+
+            # End-of-day timestamp (23:59:59 UTC) so Garmin assigns to the correct date
+            dt = datetime(
+                entry.date.year, entry.date.month, entry.date.day,
+                23, 59, 59, tzinfo=_tz.utc,
+            )
+            ts_ms = int(dt.timestamp() * 1000)
+
+            msg = MonitoringMessage()
+            msg.timestamp = ts_ms
+            msg.steps = int(entry.steps)
+            msg.activity_type = FitActivityType.WALKING
+
+            if entry.distance is not None and entry.distance > 0:
+                msg.distance = float(entry.distance) * 1000.0  # km → m
+
+            if entry.calories_burned is not None and entry.calories_burned > 0:
+                msg.calories = int(entry.calories_burned)
+
+            if entry.active_minutes is not None and entry.active_minutes > 0:
+                msg.moderate_activity_minutes = int(
+                    (entry.lightly_active_minutes or 0) + (entry.fairly_active_minutes or 0)
+                ) or None
+                msg.vigorous_activity_minutes = int(
+                    entry.very_active_minutes or 0
+                ) or None
+
+            builder.add(msg)
+            added += 1
+
+        if added == 0:
+            logger.warning("No daily metrics records had step data; skipping monitoring.fit")
+            return None
+
+        out_path = self.output_dir / "monitoring.fit"
+        fit_file = builder.build()
+        fit_file.to_file(str(out_path))
+        logger.info(f"Wrote {added} daily step records to {out_path} (skipped {skipped})")
+        return str(out_path)
+
     def batch_convert_activities(
-        self, user_data: FitbitUserData
+        self,
+        user_data: FitbitUserData,
+        formats: Optional[List[str]] = None,
     ) -> Dict[str, List[str]]:
-        """Convert all activities to multiple formats."""
+        """Convert all activities to the requested formats.
+
+        formats: list of strings from {"tcx", "gpx", "fit"}.
+                 Defaults to all three when None.
+        """
+        if formats is None:
+            formats = ["tcx", "gpx", "fit"]
+
         logger.info(
-            f"Starting batch conversion of {len(user_data.activities)} activities"
+            f"Starting batch conversion of {len(user_data.activities)} activities "
+            f"(formats: {formats})"
         )
 
         # Report what data is available per activity
         gps_count = sum(1 for a in user_data.activities if a.gps_data)
         hr_count = sum(1 for a in user_data.activities if a.average_heart_rate)
-        dist_count = sum(1 for a in user_data.activities if a.distance)
-        print(f"  📊 Activity data availability:")
-        print(f"     • {gps_count}/{len(user_data.activities)} activities have GPS tracks")
-        print(f"     • {hr_count}/{len(user_data.activities)} activities have heart rate")
-        print(f"     • {dist_count}/{len(user_data.activities)} activities have distance")
+        dist_count = sum(
+            1 for a in user_data.activities
+            if a.distance is not None and a.distance > 0
+        )
+        elev_count = sum(
+            1 for a in user_data.activities
+            if (a.elevation_gain is not None and a.elevation_gain > 0)
+            or (a.gps_data and any("altitude" in p for p in a.gps_data if isinstance(p, dict)))
+        )
+        print(f"  📊 Activity data availability ({len(user_data.activities)} total):")
+        print(f"     • {gps_count}/{len(user_data.activities)} have GPS tracks")
+        print(f"     • {hr_count}/{len(user_data.activities)} have heart rate data")
+        print(f"     • {dist_count}/{len(user_data.activities)} have distance")
+        print(f"     • {elev_count}/{len(user_data.activities)} have elevation data")
         if self.hr_data_dir and self.hr_data_dir.exists():
             hr_files = list(self.hr_data_dir.glob("heart_rate*.json"))
-            print(f"     • {len(hr_files)} intraday HR files available for detailed HR graphs")
+            print(f"     • {len(hr_files)} intraday HR files for per-second HR graphs")
+
+        # Per-type breakdown to help diagnose missing data (e.g. walking distance)
+        from collections import Counter
+        type_dist_missing = Counter()
+        type_gps_missing = Counter()
+        for a in user_data.activities:
+            atype = a.activity_type.value if a.activity_type else "unknown"
+            if a.distance is None or a.distance == 0:
+                type_dist_missing[atype] += 1
+            if not a.gps_data:
+                type_gps_missing[atype] += 1
+        if type_dist_missing:
+            top = type_dist_missing.most_common(5)
+            missing_str = ", ".join(f"{t}:{n}" for t, n in top)
+            print(f"     ℹ️  Activities without distance (top types): {missing_str}")
 
         results = {"tcx_files": [], "gpx_files": [], "fit_files": []}
 
-        # Convert to TCX
-        if user_data.activities:
+        if "tcx" in formats and user_data.activities:
             print("  🏃 Converting activities to TCX format...")
             results["tcx_files"] = self.convert_activities_to_tcx(user_data.activities)
 
-        # Convert to GPX (only GPS activities)
-        gps_activities = [a for a in user_data.activities if a.gps_data]
-        if gps_activities:
-            print(
-                f"  🗺️ Converting {len(gps_activities)} GPS activities to GPX format..."
-            )
-            results["gpx_files"] = self.convert_activities_to_gpx(gps_activities)
+        if "gpx" in formats:
+            gps_activities = [a for a in user_data.activities if a.gps_data]
+            if gps_activities:
+                print(
+                    f"  🗺️ Converting {len(gps_activities)} GPS activities to GPX format..."
+                )
+                results["gpx_files"] = self.convert_activities_to_gpx(gps_activities)
 
-        # Convert to FIT format
-        if user_data.activities:
+        if "fit" in formats and user_data.activities:
             print(
                 f"  📁 Converting {len(user_data.activities)} activities to FIT format..."
             )
             results["fit_files"] = self.convert_activities_to_fit(user_data.activities)
 
-        logger.info(
-            f"Batch conversion completed: {len(results['tcx_files'])} TCX, "
-            f"{len(results['gpx_files'])} GPX, {len(results['fit_files'])} FIT files"
-        )
+        created = []
+        if results["tcx_files"]:
+            created.append(f"{len(results['tcx_files'])} TCX")
+        if results["gpx_files"]:
+            created.append(f"{len(results['gpx_files'])} GPX")
+        if results["fit_files"]:
+            created.append(f"{len(results['fit_files'])} FIT")
 
-        print(
-            f"  ✅ Created {len(results['tcx_files'])} TCX files, "
-            f"{len(results['gpx_files'])} GPX files, {len(results['fit_files'])} FIT files"
-        )
+        logger.info(f"Batch conversion completed: {', '.join(created) or 'nothing'}")
+        print(f"  ✅ Created: {', '.join(created) or 'no activity files'}")
 
         return results

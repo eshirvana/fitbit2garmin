@@ -237,22 +237,113 @@ def convert(
 
         # Activity exports (TCX/GPX/FIT)
         if any(f in export_formats for f in ["tcx", "gpx", "fit"]) and not daily_only:
+            # Warn if GPS data is missing from export (tcxLink URLs present but no local TCX)
+            from .gps_fetcher import collect_gps_activities, _find_fitbit_path
+            _fb_path = _find_fitbit_path(Path(takeout_path))
+            if _fb_path:
+                _gps_acts = collect_gps_activities(_fb_path)
+                _activities_dir = _fb_path / "Activities"
+                _local_tcx = (
+                    len(list(_activities_dir.glob("*.tcx")))
+                    if _activities_dir.exists() else 0
+                )
+                _gps_with_local = sum(
+                    1 for a in user_data.activities if a.gps_data
+                )
+                if _gps_acts and _local_tcx == 0:
+                    click.echo(
+                        f"\n⚠️  GPS data not included in your Takeout export.\n"
+                        f"   {len(_gps_acts)} activities have GPS data on Fitbit's servers\n"
+                        f"   but it was NOT downloaded as part of the Takeout.\n"
+                        f"\n"
+                        f"   To get GPS in your FIT files:\n"
+                        f"   1. Get a Fitbit access token (see: fitbit2garmin fetch-gps --help)\n"
+                        f"   2. Run: fitbit2garmin fetch-gps {takeout_path} --token <your_token>\n"
+                        f"   3. Re-run this convert command.\n"
+                    )
+
+            # Pass the HR data directory so intraday HR can be embedded in FIT files
+            hr_data_dir = None
+            if "global_export" in parser.data_directories:
+                hr_data_dir = parser.data_directories["global_export"]
+            converter = DataConverter(output_path, hr_data_dir=hr_data_dir)
+
             if user_data.activities:
                 click.echo("🏃 Converting activities...")
-                # Pass the HR data directory so intraday HR can be embedded in FIT files
-                hr_data_dir = None
-                if "global_export" in parser.data_directories:
-                    hr_data_dir = parser.data_directories["global_export"]
-                converter = DataConverter(output_path, hr_data_dir=hr_data_dir)
-
-                activity_result = converter.batch_convert_activities(user_data)
+                activity_formats = [f for f in export_formats if f in ("tcx", "gpx", "fit")]
+                activity_result = converter.batch_convert_activities(user_data, formats=activity_formats)
                 exported_files.extend(activity_result.get("tcx_files", []))
                 exported_files.extend(activity_result.get("gpx_files", []))
                 exported_files.extend(activity_result.get("fit_files", []))
             else:
                 click.echo("ℹ️  No activities found to convert")
 
-        # FIT exports are now handled in the activity conversion above
+            # Weight / body composition FIT file
+            if "fit" in export_formats and user_data.body_composition:
+                click.echo(
+                    f"⚖️  Exporting {len(user_data.body_composition)} body composition"
+                    " records to weight.fit..."
+                )
+                weight_fit = converter.convert_body_composition_to_fit(
+                    user_data.body_composition
+                )
+                if weight_fit:
+                    exported_files.append(weight_fit)
+                    click.echo(f"   ✅ weight.fit written → import into Garmin Connect")
+
+            # Daily steps / distance / calories FIT file
+            if "fit" in export_formats and user_data.daily_metrics:
+                steps_count = sum(
+                    1 for d in user_data.daily_metrics
+                    if d.steps is not None and d.steps > 0
+                )
+                if steps_count:
+                    click.echo(
+                        f"👟 Exporting {steps_count} days of step data to monitoring.fit..."
+                    )
+                    steps_fit = converter.convert_daily_steps_to_fit(user_data.daily_metrics)
+                    if steps_fit:
+                        exported_files.append(steps_fit)
+                        click.echo(f"   ✅ monitoring.fit written")
+
+            # Sleep FIT file
+            if "fit" in export_formats and user_data.sleep_data:
+                click.echo(
+                    f"😴 Exporting {len(user_data.sleep_data)} sleep records to sleep.fit..."
+                )
+                sleep_fit = converter.convert_sleep_to_fit(user_data.sleep_data)
+                if sleep_fit:
+                    exported_files.append(sleep_fit)
+                    click.echo(f"   ✅ sleep.fit written")
+
+            # SpO2 FIT file
+            if "fit" in export_formats and user_data.spo2_data:
+                valid_spo2 = sum(1 for e in user_data.spo2_data if e.spo2_percentage is not None)
+                if valid_spo2:
+                    click.echo(
+                        f"🩸 Exporting {valid_spo2} SpO2 records to spo2.fit..."
+                    )
+                    spo2_fit = converter.convert_spo2_to_fit(user_data.spo2_data)
+                    if spo2_fit:
+                        exported_files.append(spo2_fit)
+                        click.echo(f"   ✅ spo2.fit written")
+
+            # HRV FIT file
+            if "fit" in export_formats and user_data.heart_rate_variability:
+                valid_hrv = sum(
+                    1 for e in user_data.heart_rate_variability
+                    if e.rmssd is not None and e.rmssd > 0
+                )
+                if valid_hrv:
+                    click.echo(
+                        f"💓 Exporting {valid_hrv} HRV records to hrv.fit..."
+                    )
+                    hrv_fit = converter.convert_hrv_to_fit(user_data.heart_rate_variability)
+                    if hrv_fit:
+                        exported_files.append(hrv_fit)
+                        click.echo(f"   ✅ hrv.fit written")
+
+        # FIT exports are now handled in the activity/weight/steps/sleep/spo2/hrv conversion above
 
         # Summary
         click.echo(f"✅ Conversion completed!")
@@ -558,6 +649,102 @@ def info():
     click.echo(
         "5. For activity type debugging: fitbit2garmin debug-activities path/to/Takeout"
     )
+
+
+@cli.command("fetch-gps")
+@click.argument("takeout_path", type=click.Path(exists=True))
+@click.option(
+    "--token",
+    required=True,
+    envvar="FITBIT_TOKEN",
+    help=(
+        "Fitbit API access token (Bearer token). "
+        "Can also be set via the FITBIT_TOKEN environment variable."
+    ),
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(),
+    default=None,
+    help="Directory to save downloaded TCX files (default: <Fitbit>/Activities/).",
+)
+def fetch_gps(takeout_path, token, output_dir):
+    """Download GPS tracks from Fitbit API for activities missing GPS data.
+
+    \b
+    Fitbit's Google Takeout does NOT include GPS track data — it only stores
+    a tcxLink URL per GPS activity. This command fetches the actual GPS tracks
+    from the Fitbit API and saves them as local TCX files so that 'convert'
+    can embed GPS in your FIT files.
+
+    \b
+    HOW TO GET A FITBIT ACCESS TOKEN (one-time setup):
+      1. Go to https://dev.fitbit.com/apps/new
+         - Application Type: Personal
+         - Redirect URL: https://localhost
+      2. Note your Client ID.
+      3. Open in a browser (replace YOUR_CLIENT_ID):
+         https://www.fitbit.com/oauth2/authorize?response_type=token
+           &client_id=YOUR_CLIENT_ID&redirect_uri=https%3A%2F%2Flocalhost
+           &scope=activity%20location&expires_in=604800
+         NOTE: Both 'activity' AND 'location' scopes are required for GPS data.
+      4. Approve, then copy the access_token from the redirect URL.
+      5. Run this command with --token <token>.
+
+    \b
+    After running, re-run 'convert' to generate FIT files with GPS embedded.
+    """
+    from .gps_fetcher import fetch_gps_files, collect_gps_activities, _find_fitbit_path
+
+    takeout = Path(takeout_path)
+    out_dir = Path(output_dir) if output_dir else None
+
+    try:
+        fitbit_path = _find_fitbit_path(takeout)
+        if fitbit_path is None:
+            click.echo(f"❌ Fitbit data not found under {takeout}", err=True)
+            raise SystemExit(1)
+
+        gps_acts = collect_gps_activities(fitbit_path)
+        if not gps_acts:
+            click.echo("ℹ️  No GPS activities found in your Takeout export.")
+            return
+
+        click.echo(
+            f"📍 Found {len(gps_acts)} activities with GPS data to download."
+        )
+
+        if out_dir is None:
+            out_dir = fitbit_path / "Activities"
+        click.echo(f"   Saving TCX files to: {out_dir}")
+
+        downloaded, failed = fetch_gps_files(
+            takeout_path=takeout,
+            token=token,
+            output_activities_dir=out_dir,
+        )
+
+        click.echo(f"\n✅ Downloaded: {downloaded}  |  Failed: {failed}")
+        if downloaded > 0:
+            click.echo(
+                "\nNext step: re-run 'fitbit2garmin convert' to regenerate FIT files "
+                "with GPS embedded."
+            )
+        if failed > 0:
+            click.echo(
+                f"⚠️  {failed} downloads failed. Check --verbose for details. "
+                "Common causes: expired token, activity deleted from Fitbit."
+            )
+
+    except RuntimeError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        if logger.isEnabledFor(logging.DEBUG):
+            import traceback
+            traceback.print_exc()
+        raise SystemExit(1)
 
 
 def main():
