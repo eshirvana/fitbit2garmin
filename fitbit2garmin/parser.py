@@ -339,6 +339,21 @@ class FitbitParser:
                 print(f"  📁 Processing activities from: {activity_path.name}")
                 activities.extend(self._parse_activities_from_path(activity_path))
 
+        # Deduplicate by logId — the same activity can appear in multiple JSON files
+        # (e.g., exercise.json in both Global Export Data and Activities directories).
+        seen_ids: set = set()
+        unique_activities = []
+        for act in activities:
+            if act.log_id and act.log_id in seen_ids:
+                continue
+            if act.log_id:
+                seen_ids.add(act.log_id)
+            unique_activities.append(act)
+        if len(unique_activities) < len(activities):
+            dupes = len(activities) - len(unique_activities)
+            logger.info(f"Removed {dupes} duplicate activity entries (same logId)")
+        activities = unique_activities
+
         # GPS data in Fitbit Google Takeout lives in separate .tcx files inside
         # the Activities/ directory — not embedded in the exercise JSON files.
         # Attach GPS trackpoints to matching activities now.
@@ -1885,6 +1900,32 @@ class FitbitParser:
 
                 gps_points.append(point)
 
+            # Post-process: compute speed (m/s) from consecutive distance/time
+            # deltas for points that don't already carry a speed value.
+            for i in range(1, len(gps_points)):
+                if "speed" in gps_points[i]:
+                    continue
+                curr = gps_points[i]
+                prev = gps_points[i - 1]
+                if (
+                    "distance" in curr
+                    and "distance" in prev
+                    and "time" in curr
+                    and "time" in prev
+                ):
+                    try:
+                        from dateutil.parser import parse as _pdp
+                        dt_s = (
+                            _pdp(curr["time"]) - _pdp(prev["time"])
+                        ).total_seconds()
+                        if dt_s > 0:
+                            gps_points[i]["speed"] = max(
+                                0.0,
+                                (curr["distance"] - prev["distance"]) / dt_s,
+                            )
+                    except Exception:
+                        pass
+
             return (gps_points if gps_points else None), start_time_str
 
         except Exception as e:
@@ -1899,17 +1940,24 @@ class FitbitParser:
         the exercise JSON files.  Matching is attempted in two ways:
           1. If the TCX filename stem is purely numeric it is treated as a logId.
           2. Otherwise the TCX file is parsed for its <Id> start-time and matched
-             against activity start times (within a 60-second tolerance).
+             against activity start times (within a 120-second tolerance).
         """
         if "activities" not in self.data_directories:
+            print(
+                "  ⚠️  No 'Activities' directory found in Fitbit export — "
+                "GPS data will not be embedded in activity files. "
+                "Expected: Takeout/Fitbit/Activities/*.tcx"
+            )
             return
 
         tcx_dir = self.data_directories["activities"]
         if not tcx_dir.exists():
+            print(f"  ⚠️  Activities directory does not exist: {tcx_dir}")
             return
 
         tcx_files = list(tcx_dir.glob("**/*.tcx"))
         if not tcx_files:
+            print(f"  ℹ️  No TCX files found in {tcx_dir} — activities have no GPS tracks")
             return
 
         print(f"  📍 Found {len(tcx_files)} TCX file(s) with potential GPS data")
@@ -1925,6 +1973,7 @@ class FitbitParser:
         }
 
         attached = 0
+        unmatched_tcx: List[str] = []
         for tcx_file in tcx_files:
             try:
                 activity = None
@@ -1942,8 +1991,8 @@ class FitbitParser:
                     if start_time_str:
                         try:
                             tcx_ts = int(parse_datetime(start_time_str).timestamp())
-                            # Allow ±60 s tolerance for clock/timezone drift
-                            for offset in range(-60, 61):
+                            # Allow ±120 s tolerance for clock drift / timezone edge cases
+                            for offset in range(-120, 121):
                                 activity = start_ts_map.get(tcx_ts + offset)
                                 if activity:
                                     break
@@ -1951,6 +2000,7 @@ class FitbitParser:
                             pass
 
                 if not activity:
+                    unmatched_tcx.append(tcx_file.name)
                     continue
 
                 # Parse GPS points if strategy 1 was used (not yet parsed)
@@ -1965,9 +2015,31 @@ class FitbitParser:
                         f"Attached {len(gps_points)} GPS points to activity "
                         f"{activity.log_id} from {tcx_file.name}"
                     )
+                else:
+                    logger.debug(f"TCX file {tcx_file.name} has no valid GPS points (no lat/lon)")
 
             except Exception as e:
                 logger.warning(f"Error attaching GPS from {tcx_file.name}: {e}")
 
         if attached:
             print(f"  ✅ Attached GPS data to {attached} activities from TCX files")
+        else:
+            print(
+                f"  ⚠️  Found {len(tcx_files)} TCX file(s) but could not match any to activities. "
+                "GPS will not appear in exported files."
+            )
+
+        if unmatched_tcx:
+            logger.debug(
+                f"Unmatched TCX files ({len(unmatched_tcx)}): "
+                + ", ".join(unmatched_tcx[:10])
+                + (" ..." if len(unmatched_tcx) > 10 else "")
+            )
+            if len(unmatched_tcx) > len(tcx_files) // 2:
+                # More than half unmatched — likely a systematic matching problem
+                sample = unmatched_tcx[:3]
+                print(
+                    f"  ⚠️  {len(unmatched_tcx)}/{len(tcx_files)} TCX files could not be "
+                    f"matched to activities (sample: {sample}). "
+                    "Run with --verbose for details."
+                )
