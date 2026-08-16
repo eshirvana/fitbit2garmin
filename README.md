@@ -30,8 +30,7 @@ full build history and every real bug found along the way.
 | Weight/BMI/body-fat (FIT) | ✅ Confirmed working against a real Garmin Connect account |
 | Weight/BMI/body-fat (CSV) | ⚠️ Real bugs found and fixed (see below); not re-tested since FIT worked first |
 | Daily totals CSV (steps/calories/distance/floors/active-minutes) | ⚠️ Format confirmed from a real reference implementation's source, not yet tested against Garmin |
-| Sleep (FIT) | ❌ Confirmed **rejected** by Garmin Connect ("Sorry, your upload failed. Register your device, and try again.") — see below. CSV archive only by default. |
-| Resting HR / SpO2 / HRV (FIT) | ❌ Confirmed to **upload successfully but pollute your real activity history** — each daily reading becomes its own fake zero-duration "activity". CSV archive only by default. |
+| Sleep / Resting HR / SpO2 / HRV (any format) | ❌ **Confirmed: Garmin's import tool cannot genuinely import this data at all**, regardless of format — see below. CSV archive (personal reference only, never intended to import) is the practical end state. |
 
 ## Installation
 
@@ -106,15 +105,32 @@ files are minute-level; storing every reading would reproduce the exact
 15GB+/19M-row memory problem this project was explicitly designed to avoid, for
 data that's lowest priority to begin with).
 
-Default output: `daily_totals_garmin_import.csv` (Garmin's official CSV format,
-not yet confirmed working) plus `sleep_archive.csv`/`resting_hr_archive.csv`/
-`spo2_archive.csv`/`hrv_archive.csv` — **personal-reference CSVs, not
-Garmin-importable**. That's deliberate: the FIT path for these four was tried
-against a real Garmin Connect account and confirmed to make things worse, not
-better (sleep rejected outright, the other three upload but pollute your real
-activity history — see Status above). It's still available via
-`--include-fit-monitoring` if you want to experiment despite that, but the
-default steers you away from it.
+Default output: `daily_totals_garmin_import.csv` (Garmin's official CSV format)
+plus `sleep_archive.csv`/`resting_hr_archive.csv`/`spo2_archive.csv`/
+`hrv_archive.csv` — **personal-reference CSVs, not Garmin-importable, and not
+intended to be**. Open them in a spreadsheet if you want to look at your
+history; don't try to import them.
+
+**Conclusion, after testing every path against a real Garmin Connect account**:
+there is no way to get historical sleep, resting HR, SpO2, or HRV data into
+Garmin Connect via manual import, in any format. This isn't a gap this project
+can engineer around:
+- `sleep.fit` (`FileType.MONITORING_B`) is rejected outright by Garmin's
+  server ("Sorry, your upload failed. Register your device, and try again.")
+  — a device-authenticity check, not a format issue.
+- `resting_hr.fit`/`spo2.fit`/`hrv.fit` (`FileType.ACTIVITY`, one fake
+  mini-session per daily reading) upload "successfully" but only by disguising
+  each reading as an activity, polluting your real activity history rather
+  than actually populating Garmin's Sleep/HRV/SpO2 dashboards.
+- The CSV archive files were never formatted for Garmin's importer at all —
+  confirmed to do nothing when uploaded, as expected.
+- Garmin's own "Import Data From Fitbit" documentation only ever mentions
+  activities, body composition, and daily activity totals as importable —
+  sleep/HRV/SpO2 are conspicuously absent, consistent with everything above.
+
+The FIT path is still available via `--include-fit-monitoring` if you want to
+experiment despite this, but treat it as confirmed non-functional, not
+best-effort.
 
 ### Other commands
 
