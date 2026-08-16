@@ -78,6 +78,10 @@ def test_daily_totals_distance_unit_conversion(conn, tmp_path):
         "INSERT INTO monitoring_metric (metric_type, source_file, ts_utc, value) "
         "VALUES ('distance_daily', 'fixture.json', '2020-06-15T00:00:00Z', 8000)"  # 8000 m = 8 km
     )
+    conn.execute(
+        "INSERT INTO monitoring_metric (metric_type, source_file, ts_utc, value) "
+        "VALUES ('steps_daily', 'fixture.json', '2020-06-15T00:00:00Z', 10000)"  # needed: rows are filtered to steps > 0
+    )
     conn.commit()
 
     path, _ = write_daily_totals_csv(conn, tmp_path / "daily.csv", units="metric")
@@ -89,6 +93,34 @@ def test_daily_totals_distance_unit_conversion(conn, tmp_path):
     line2 = [l for l in path2.read_text().split("\n") if l.startswith("2020-06-15")][0]
     distance_field2 = line2.split(",")[3]
     assert float(distance_field2) == pytest.approx(8.0 * 0.621371, abs=0.01)  # miles
+
+
+def test_daily_totals_excludes_zero_step_days(conn, tmp_path):
+    # Confirmed via simonepri/fitbit2garmin's real source: rows are filtered to
+    # steps > 0 before being written. A real Garmin upload failure was traced to
+    # this exact gap -- an incomplete first-tracking-day row (steps=0, but other
+    # fields present) was included where the reference tool would have excluded
+    # it, and Garmin's importer rejected the whole file generically.
+    conn.execute(
+        "INSERT INTO monitoring_metric (metric_type, source_file, ts_utc, value) "
+        "VALUES ('sedentary_minutes', 'fixture.json', '2020-06-14T00:00:00Z', 1009)"
+    )
+    conn.execute(
+        "INSERT INTO monitoring_metric (metric_type, source_file, ts_utc, value) "
+        "VALUES ('steps_daily', 'fixture.json', '2020-06-14T00:00:00Z', 0)"
+    )
+    conn.execute(
+        "INSERT INTO monitoring_metric (metric_type, source_file, ts_utc, value) "
+        "VALUES ('steps_daily', 'fixture.json', '2020-06-15T00:00:00Z', 5000)"
+    )
+    conn.commit()
+
+    path, n = write_daily_totals_csv(conn, tmp_path / "daily.csv")
+    content = path.read_text()
+
+    assert n == 1
+    assert "2020-06-14" not in content
+    assert "2020-06-15" in content
 
 
 def test_daily_totals_sample_days_limits_to_earliest_dates(conn, tmp_path):

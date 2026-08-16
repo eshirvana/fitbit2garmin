@@ -26,6 +26,13 @@ accordingly, --units exposed in case a real import shows otherwise.
 Daily-totals format, confirmed from the same source:
     Activities
     Date,Calories Burned,Steps,Distance,Floors,Minutes Sedentary,Minutes Lightly Active,Minutes Fairly Active,Minutes Very Active,Activity Calories
+Also confirmed from that source and REQUIRED, not cosmetic: rows are filtered
+to `steps > 0` before being written at all -- a real upload failure was traced
+to this exact gap (an early version wrote every day with any data, including a
+steps=0 incomplete-first-tracking-day row the reference tool would never have
+produced; Garmin's importer rejected the file generically, same as the earlier
+Body-marker-line failure).
+
 NOT available from this project's data sources: "Activity Calories" (calories
 above BMR) has no equivalent ingested field -- written as 0 (the established
 not-available placeholder, per the Fat=0 convention above), a known real gap,
@@ -126,6 +133,17 @@ def write_daily_totals_csv(
         ).fetchall():
             date = row["ts_utc"][:10]
             by_date.setdefault(date, {})[metric_type] = row["value"]
+
+    # Confirmed via simonepri/fitbit2garmin's real source (the same reference
+    # used for the Body/Activities marker format): it filters to
+    # `steps > 0` before ever writing a row -- days with 0 steps (e.g. an
+    # incomplete first-tracking-day artifact, confirmed present in this user's
+    # real export) are never included. A real upload failure was traced to this
+    # exact gap: our output included a steps=0 row the reference tool would
+    # never have produced, and that row happened to be first in a --sample-days
+    # slice. Matching the reference behavior exactly rather than guessing at a
+    # different threshold.
+    by_date = {d: m for d, m in by_date.items() if m.get("steps_daily", 0.0) > 0}
 
     if sample_days:
         earliest_dates = sorted(by_date)[:sample_days]
