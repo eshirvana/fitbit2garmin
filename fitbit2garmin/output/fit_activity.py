@@ -11,6 +11,7 @@ altitude/speed clamped to their FIT UINT16-encodable ranges before assignment,
 and one bad point never aborts the whole file.
 """
 
+import json
 import logging
 import math
 import sqlite3
@@ -214,7 +215,11 @@ def build_activity_fit(conn: sqlite3.Connection, activity_uid: str) -> tuple[byt
     file_id.type = FileType.ACTIVITY
     file_id.manufacturer = Manufacturer.DEVELOPMENT
     file_id.product = 1
-    file_id.product_name = "Fitbit2Garmin"
+    # product_name is a free-text field (not a manufacturer/product identity
+    # code -- those stay honestly set to DEVELOPMENT/1, this tool's own
+    # identity) -- using it to note which Fitbit device actually recorded the
+    # activity, when known, is accurate metadata, not a fabricated claim.
+    file_id.product_name = activity["source_device"] or "Fitbit2Garmin"
     file_id.time_created = start_ms
     builder.add(file_id)
 
@@ -296,6 +301,16 @@ def build_activity_fit(conn: sqlite3.Connection, activity_uid: str) -> tuple[byt
             msg.min_altitude = gps_stats["min_altitude_m"]
         if gps_stats.get("max_speed_ms") is not None:
             msg.max_speed = gps_stats["max_speed_ms"]
+        if activity["avg_speed_ms"] is not None:
+            msg.avg_speed = activity["avg_speed_ms"]
+        if activity["avg_cadence"] is not None:
+            # avg_running_cadence only survives encode/decode for Sport.RUNNING
+            # (confirmed by direct round-trip test -- it silently comes back None
+            # for Sport.WALKING despite fit-tool accepting the assignment without
+            # error). avg_cadence (generic) round-trips correctly for both.
+            msg.avg_cadence = activity["avg_cadence"]
+        if activity["time_in_hr_zone_json"]:
+            msg.time_in_hr_zone = json.loads(activity["time_in_hr_zone_json"])
 
     lap = LapMessage()
     _apply_common_fields(lap)

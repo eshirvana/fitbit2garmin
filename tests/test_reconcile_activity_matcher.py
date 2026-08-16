@@ -3,6 +3,7 @@ claim-guard conflict case, and the sparse-fragment minimal-session guarantee
 (decision #11 in the project plan: AUTO_DETECTED rows with blank tracker fields
 must still produce a valid activity, never be dropped or crash the batch)."""
 
+import json
 import sqlite3
 
 import pytest
@@ -172,3 +173,56 @@ def test_zero_heart_rate_is_treated_as_not_measured(conn):
     row = conn.execute("SELECT * FROM activity WHERE user_exercise_id=9").fetchone()
     assert row["avg_heart_rate"] is None
     assert row["peak_heart_rate"] is None
+
+
+def test_avg_speed_derived_from_distance_and_duration_not_tracker_fields(conn):
+    # Confirmed against real data: tracker_avg_speed_mm_per_second and
+    # tracker_peak_speed_mm_per_second don't hold what their names claim (avg is
+    # ~100x too large vs a distance/duration sanity check; peak is sometimes
+    # smaller than avg, which is physically impossible). avg_speed_ms must be
+    # derived from distance/duration instead, ignoring those columns entirely.
+    conn.execute(
+        """INSERT INTO raw_user_exercise
+           (exercise_id, source_file, exercise_start_utc, exercise_end_utc, activity_name,
+            log_type, tracker_total_distance_mm, tracker_avg_speed_mm_per_second,
+            tracker_peak_speed_mm_per_second)
+           VALUES (10, 'fixture.csv', '2020-01-01T10:00:00Z', '2020-01-01T10:30:00Z',
+                   'Outdoor Walk', 'TRACKER', 1000000, 999999, 1)"""
+    )
+    conn.commit()
+
+    reconcile_all(conn)
+
+    row = conn.execute("SELECT * FROM activity WHERE user_exercise_id=10").fetchone()
+    # distance = 1000000mm = 1000m, duration = 1800s -> 0.5556 m/s
+    assert row["avg_speed_ms"] == pytest.approx(1000.0 / 1800.0, abs=0.001)
+
+
+def test_cadence_only_computed_for_walk_run_hike(conn):
+    _insert_ue(conn, 11, "2020-01-01T10:00:00Z", "2020-01-01T10:30:00Z", activity_name="Tennis")
+    conn.execute(
+        "UPDATE raw_user_exercise SET tracker_total_steps=3000 WHERE exercise_id=11"
+    )
+    conn.commit()
+
+    reconcile_all(conn)
+
+    row = conn.execute("SELECT * FROM activity WHERE user_exercise_id=11").fetchone()
+    assert row["avg_cadence"] is None  # Tennis isn't a cadence-relevant sport
+
+
+def test_source_device_and_hr_zone_breakdown_carried_from_exercise_json(conn):
+    _insert_ue(conn, 12, "2020-01-01T10:00:00Z", "2020-01-01T10:30:00Z")
+    conn.execute(
+        """INSERT INTO raw_exercise_json
+           (log_id, source_file, start_time_utc, activity_type_id, source_device, heart_rate_zones_json)
+           VALUES (112, 'fixture.json', '2020-01-01T10:00:00Z', 90013, 'Charge HR',
+                   '[{"name":"Out of Range","min":30,"max":95,"minutes":5},{"name":"Fat Burn","min":95,"max":133,"minutes":20}]')"""
+    )
+    conn.commit()
+
+    reconcile_all(conn)
+
+    row = conn.execute("SELECT * FROM activity WHERE user_exercise_id=12").fetchone()
+    assert row["source_device"] == "Charge HR"
+    assert json.loads(row["time_in_hr_zone_json"]) == [300, 1200]  # minutes*60, ascending by zone min
