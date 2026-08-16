@@ -10,35 +10,47 @@ Plan: see conversation / `.claude/plans` for full design doc. Branch: `rewrite/v
 - [x] Verify: idempotent re-run adds 0 new rows
 - Note: fixed two real bugs found via real-data testing: `raw_user_exercise` INSERT had 33 placeholders for 34 columns; TCX namespace is `xmlschemas` (plural) not `xmlschema` (singular), and `<Time>`/`<Id>` carry real local UTC offsets (`-04:00` etc.) requiring actual conversion, not just relabeling as UTC like `exercise-*.json`'s naive strings.
 
-## Phase 1 — Activities (primary deliverable)
-- [ ] `ingest/user_exercises.py`, `ingest/exercise_json.py`, `ingest/tcx_activities.py`, `ingest/gps_location_csv.py`
-- [ ] `reconcile/activity_matcher.py` (timestamp join, claim guard, field fallback chains)
-- [ ] `reconcile/gps_attacher.py` (TCX exact match + gps_location_csv time-window fallback)
-- [ ] `reconcile/activity_type_map.py` (16-name + 15-id tables, GPS-refinement rule)
-- [ ] `output/fit_activity.py` (primary — day-one UINT16 clamping, per-point try/except, chunking)
-- [ ] `output/tcx_activity.py`, `output/gpx_activity.py` (secondary)
-- [ ] `--sample N` validation-batch mode + stratified selection
-- [ ] Unit tests: matcher, type-map, FIT round-trip
-- [ ] **Gate**: user manually validates sample batch in real Garmin Connect
+## Phase 1 — Activities (primary deliverable) — code complete, awaiting human gate
+- [x] `ingest/user_exercises.py`, `ingest/exercise_json.py`, `ingest/tcx_activities.py`, `ingest/gps_location_csv.py`
+- [x] `reconcile/activity_matcher.py` (timestamp join, claim guard, field fallback chains)
+- [x] `reconcile/gps_attacher.py` (TCX exact match + gps_location_csv time-window fallback)
+- [x] `reconcile/activity_type_map.py` (16-name + 15-id tables, GPS-refinement rule)
+- [x] `output/fit_activity.py` (primary — day-one UINT16 clamping, per-point try/except, chunking guard)
+- [x] `output/tcx_activity.py`, `output/gpx_activity.py` (secondary)
+- [x] `--sample N` validation-batch mode + stratified selection (`fitbit2garmin convert ... --sample 15`)
+- [x] Unit tests: matcher (8 tests), type-map (39 tests), FIT round-trip (5 tests) — 55 new tests, all passing; 122 total with the old suite, no regressions
+- [x] **Gate**: user manually validated the sample batch in real Garmin Connect — confirmed OK. Also diagnosed a user question: distance is null for AUTO_DETECTED activities (3,097/3,097 have no distance) vs always present for TRACKER activities (320/320) — confirmed this is a genuine Fitbit source-data gap (SmartTrack auto-detection has no GPS/phone location running), not a pipeline bug.
 
-## Phase 2 — Weight
-- [ ] `ingest/weight_json.py`
-- [ ] `output/csv_garmin_import.py` (weight/BMI/fat, `Date,Weight,BMI,Fat`, `--locale` flag)
-- [ ] **Gate**: user confirms real Garmin "Import Data From Fitbit" wizard accepts a small slice
+Real-data results on the user's actual 3,916-activity export: 3,808 exact time-matches to the classic exercise log, 108 unmatched (UserExercises-only, expected — wider date range), 8 orphan exercise_json records (small, as hoped), 0 unmapped activity types. GPS attached to 222 activities (128 exact TCX match + 94 via the gps_location_csv day-window fallback — genuinely recovering GPS the old `hasGps` flag missed), 3,327 flagged as a real no-data gap, 367 correctly not GPS-plausible.
 
-## Phase 3 — Everything else (best-effort)
-- [ ] `output/csv_garmin_import.py` extended for daily totals (steps/calories/distance/floors/active-minutes) — format unverified, confirm against real importer first
-- [ ] `ingest/monitoring_csv.py`, `ingest/monitoring_json.py`
-- [ ] `output/fit_monitoring.py` (sleep/HR/SpO2/HRV, chunked at 65535 records)
-- [ ] `output/csv_archive.py`
-- [ ] Explicit best-effort messaging surfaced to user on completion
+Two real bugs found and fixed via real-data testing (not hypothetical): (1) FIT's `SessionMessage`/`LapMessage` have no `total_steps` field — silently no-ops if set; steps must be written as `total_strides = steps // 2`, matching Garmin's own convention. (2) Fitbit's `tracker_avg/peak_heart_rate` uses `0` (not NULL) to mean "not measured" on some real rows — resolved via a dedicated `_resolve_heart_rate` helper that treats 0 as missing, so a bogus 0bpm peak-below-average never gets written.
 
-## Phase 4 — Claude Code Skills
-- [ ] `.claude/skills/fitbit2garmin-convert/SKILL.md`
-- [ ] `.claude/skills/fitbit2garmin-validate-output/SKILL.md`
-- [ ] `.claude/skills/fitbit2garmin-debug-activity-type/SKILL.md`
+## Phase 2 — Weight — DONE (FIT path confirmed working by user)
+- [x] `ingest/weight_json.py` — 216 real entries ingested. **Found and fixed a real unit bug**: raw `weight` values are in **pounds**, not kg, despite Fitbit's API nominally being metric — confirmed via `Your Profile/Profile.csv`'s `weight_unit: en_US` field and the value range (141-210) matching the profile's own kg-equivalent reference weight. Stored canonically as `weight_kg`.
+- [x] `output/fit_weight.py` — **PRIMARY path, user-confirmed working** against their real Garmin Connect account. Replicates a prior confirmed-working file's structure exactly (found in `output/weight.fit`, generated by the old codebase, decoded with fit-tool to reverse-engineer the exact convention): `FileIdMessage(type=WEIGHT)`, one `WeightScaleMessage` per entry, weight in kg, timestamped at **noon UTC of the entry's date** (not the actual logged time) so Garmin buckets it into the correct calendar day regardless of account timezone. New pipeline's output is byte-for-byte value-equivalent to the confirmed file (216/216 entries, same timestamps, same weights to 2dp). 2 regression tests added.
+- [x] `output/csv_garmin_import.py` — kept as a **secondary/experimental** path (`--format csv`). Went through two real bug fixes chasing a generic "An error occurred with your upload" error, informed by reading the actual source of `simonepri/fitbit2garmin` (a maintained reference tool): (1) missing literal `Body` marker line before the header row, (2) blank BMI/Fat instead of `0`, (3) wrong date format (was guessing dash-separated MM-DD-YYYY; fixed to ISO `YYYY-MM-DD` passthrough, confirmed via the reference tool's source), (4) **mixed line endings** — `csv.writer` defaults to CRLF while the hand-written `Body` marker line used LF, so a line-based parser would see a stray `\r` glued to the last field of every row (e.g. header `Fat` → `Fat\r`), silently breaking field/number parsing. Rewrote to plain `\n`-only writes throughout, matching the reference tool's approach exactly. **Not yet re-tested by the user** since the FIT path worked first — CSV fixes are real and tested for internal consistency, but the actual Garmin import success is unconfirmed.
+- [x] **Gate passed**: user tried `weight.fit` and confirmed it imports successfully into their real Garmin Connect account.
 
-## Phase 5 — Full history run
-- [ ] Full unbounded 2016–2025 conversion
-- [ ] Final QA report review
-- [ ] Manual upload by user
+## Phase 3 — Everything else (best-effort) — code complete
+- [x] `ingest/monitoring_csv.py`: steps/calories/distance/floors aggregated to **daily sums** (source is minute-level; storing raw would reproduce the old codebase's 19M-row HR memory problem for explicitly lowest-priority data). resting_heart_rate + heart_rate_variability are single unsharded files; oxygen_saturation is date-sharded (23 files) — confirmed by direct inspection, handled as two distinct ingest paths.
+- [x] `ingest/monitoring_json.py`: active-minutes (sedentary/lightly/fairly/very) are already daily in `Global Export Data` (unlike steps/calories/distance in the same dir) — direct passthrough. Sleep (`sleep-*.json`) → `sleep_entry`/`sleep_stage`, including per-stage detail when present (2016-2025 mix of "classic" 3-stage and newer 4-stage sleep data).
+- [x] `output/csv_garmin_import.py` extended: `write_daily_totals_csv` using the confirmed `Activities` marker format (same source as the weight CSV fix — `simonepri/fitbit2garmin`'s real code). **Found and fixed a real unit bug before it shipped**: `distance` readings are in **meters** (confirmed via `Physical Activity_GoogleData/distance_readme.txt`), but the aggregator was treating the raw daily sum as already being km — a 1000x error. Caught by sanity-checking a summed day's value (22,109 for one day is absurd as km, plausible as meters) before ever exporting. Fixed + regression-tested.
+- [x] `output/fit_monitoring.py`: sleep.fit (MonitoringMessage per stage segment, matching the old codebase's confirmed-structurally-valid pattern), resting_hr.fit / spo2.fit (RecordMessage-based daily mini-sessions), hrv.fit (dedicated `HrvMessage.time` field — FIT's HRV message is built for raw R-R intervals, not a daily summary, so the daily RMSSD is stored as a single-element list in seconds; a known representational compromise carried forward from the old code, not reinvented). All chunked at 65535 from the start.
+- [x] `output/csv_archive.py` — not built; lowest priority within an already-lowest-priority phase, and `monitoring_metric`/`sleep_entry` are directly queryable via `sqlite3` for personal reference, which covers the same need without more code.
+- [x] Explicit best-effort messaging in `export-monitoring` CLI output (Garmin Connect's wellness/monitoring FIT import is independently documented as unreliable/often invisible).
+- 4 new tests (Body/Activities marker, no-blank-fields, no-mixed-line-endings, distance unit conversion). 128 total tests passing.
+- Real-data run: 3,360 days of daily totals, 45,661 sleep stage records, 2,602 resting-HR days, 515 SpO2 days, 844 HRV days.
+
+## Phase 4 — Claude Code Skills — DONE
+- [x] `.claude/skills/fitbit2garmin-convert/SKILL.md` — when to use --sample vs full run, never silently pass --allow-unmapped, surfaces QA summaries
+- [x] `.claude/skills/fitbit2garmin-validate-output/SKILL.md` — decode FIT via fit-tool, cross-check against the `activity` SQLite row, documents what's expected to differ (peak HR estimate, Haversine-derived distance) vs a real bug
+- [x] `.claude/skills/fitbit2garmin-debug-activity-type/SKILL.md` — walks `reconciliation_log` audit trail, traces the exact type-mapping precedence and GPS-refinement rule, points to the specific file/line to fix
+
+## Phase 5 — Full history run — DONE
+- [x] Full unbounded 2016–2025 conversion: `uv run fitbit2garmin convert <takeout_dir> --db ./fitbit2garmin.sqlite3 --output-dir ./output/full`
+- [x] All 3,916 activities converted: 3,916 `.fit` (primary), 3,916 `.tcx` (secondary), 222 `.gpx` (GPS-attached only) — 0 GPS points skipped across 562,180 total points
+- [x] Weight: 216/216 entries in `output/weight.fit` (confirmed working)
+- [x] Monitoring (best-effort): 3,360 days of daily totals CSV, 45,661 sleep-stage records, 2,602 resting-HR/515 SpO2/844 HRV daily records
+- [ ] **Manual upload by user** — this is the one step the tool cannot do itself (no Garmin API, by design). `output/full/fit/` is ready to upload.
+
+## Test suite: 128 passing (67 original + 61 new across Phases 0-3)

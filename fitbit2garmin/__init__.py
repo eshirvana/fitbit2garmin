@@ -1,16 +1,9 @@
 """
-Fitbit to Garmin Data Migration Tool
+fitbit2garmin: migrate a Fitbit Google Takeout export to Garmin Connect.
 
-A comprehensive Python tool for converting Fitbit Google Takeout data
-to Garmin Connect compatible formats, maximizing data preservation.
+Architecture: ingest (raw Takeout files -> SQLite staging DB) -> reconcile
+(-> canonical `activity` table) -> output (-> Garmin-importable FIT/TCX/GPX/CSV
+files). See PROGRESS.md and CLAUDE.md for full details.
 """
 
-__version__ = "1.1.0"
-__author__ = "Fitbit2Garmin Team"
-__email__ = "support@fitbit2garmin.com"
-
-from .parser import FitbitParser
-from .converter import DataConverter
-from .exporter import GarminExporter
-
-__all__ = ["FitbitParser", "DataConverter", "GarminExporter"]
+__version__ = "2.0.0"
