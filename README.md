@@ -18,9 +18,9 @@ full build history and every real bug found along the way.
 - **Never talks to Garmin's or Fitbit's servers.** No API keys, no OAuth, no
   upload automation. You control every import.
 - Activities are the priority: correct sport type, GPS, and full detail. Weight
-  is next. Sleep/HR/SpO2/HRV/daily-totals are explicitly best-effort — Garmin
-  Connect's dashboard is independently documented as often not displaying
-  wellness data even after a successful upload.
+  is next. Sleep/HR/SpO2/HRV are exported as a personal-reference CSV archive
+  only — the FIT import path was tried against a real Garmin Connect account
+  and confirmed to make things worse, not better (see Status below).
 
 ## Status (as of this rewrite)
 
@@ -30,7 +30,8 @@ full build history and every real bug found along the way.
 | Weight/BMI/body-fat (FIT) | ✅ Confirmed working against a real Garmin Connect account |
 | Weight/BMI/body-fat (CSV) | ⚠️ Real bugs found and fixed (see below); not re-tested since FIT worked first |
 | Daily totals CSV (steps/calories/distance/floors/active-minutes) | ⚠️ Format confirmed from a real reference implementation's source, not yet tested against Garmin |
-| Sleep / resting-HR / SpO2 / HRV (FIT) | ⚠️ Best-effort — structurally valid, no guarantee Garmin displays it |
+| Sleep (FIT) | ❌ Confirmed **rejected** by Garmin Connect ("Sorry, your upload failed. Register your device, and try again.") — see below. CSV archive only by default. |
+| Resting HR / SpO2 / HRV (FIT) | ❌ Confirmed to **upload successfully but pollute your real activity history** — each daily reading becomes its own fake zero-duration "activity". CSV archive only by default. |
 
 ## Installation
 
@@ -103,9 +104,17 @@ fitbit2garmin export-monitoring path/to/Takeout --output-dir ./output
 Steps/calories/distance/floors are aggregated to **daily sums** (the source
 files are minute-level; storing every reading would reproduce the exact
 15GB+/19M-row memory problem this project was explicitly designed to avoid, for
-data that's lowest priority to begin with). Sleep gets per-stage detail when
-available. All FIT output is chunked at 65,535 records per file (a real FIT
-format limit — UINT16 message counts).
+data that's lowest priority to begin with).
+
+Default output: `daily_totals_garmin_import.csv` (Garmin's official CSV format,
+not yet confirmed working) plus `sleep_archive.csv`/`resting_hr_archive.csv`/
+`spo2_archive.csv`/`hrv_archive.csv` — **personal-reference CSVs, not
+Garmin-importable**. That's deliberate: the FIT path for these four was tried
+against a real Garmin Connect account and confirmed to make things worse, not
+better (sleep rejected outright, the other three upload but pollute your real
+activity history — see Status above). It's still available via
+`--include-fit-monitoring` if you want to experiment despite that, but the
+default steers you away from it.
 
 ### Other commands
 
@@ -178,6 +187,19 @@ patched around. See `fitbit2garmin/reconcile/activity_matcher.py` and the
   batch uploads** (confirmed: a structurally valid file failed generically as
   part of a ~3,900-file upload, succeeded uploaded alone) — hence
   `batch-output`.
+- FIT files for sleep/HR/SpO2/HRV don't have a working manual-import path at
+  all: `sleep.fit` (`FileType.MONITORING_B`) is **rejected outright** ("Sorry,
+  your upload failed. Register your device, and try again.") — Garmin's manual
+  upload validates monitoring-type files against registered devices in a way
+  activity/weight uploads aren't subjected to. `resting_hr.fit`/`spo2.fit`/
+  `hrv.fit` (`FileType.ACTIVITY`, one mini-session per daily reading — the same
+  pattern the old codebase used) upload successfully but **each reading shows
+  up as its own fake zero-duration activity**, polluting real activity
+  history. Both confirmed against a real account. The only known workarounds
+  for the first (device/serial spoofing tools like "FIT File Faker") weren't
+  implemented here — that's circumventing a device-authenticity control, not
+  fixing a format bug. Default output for these four is a CSV archive instead
+  (`--include-fit-monitoring` re-enables the FIT path if you want it anyway).
 
 ## Known limitations
 
