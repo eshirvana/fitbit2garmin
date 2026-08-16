@@ -13,6 +13,8 @@ from . import __version__
 from .parser import FitbitParser
 from .converter import DataConverter
 from .exporter import GarminExporter
+from . import pipeline as v2_pipeline
+from .config import DEFAULT_DB_FILENAME
 
 # Set up logging
 logging.basicConfig(
@@ -751,6 +753,63 @@ def fetch_gps(takeout_path, token, output_dir):
             import traceback
             traceback.print_exc()
         raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("takeout_path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help=f"SQLite staging DB path (default: <takeout_path>/{DEFAULT_DB_FILENAME})",
+)
+def ingest(takeout_path, db_path):
+    """[v2 rewrite] Parse a Takeout export into the SQLite staging database.
+
+    Idempotent: unchanged files are skipped on re-run via content-hash tracking.
+    Currently covers Activities scope (UserExercises, exercise_json, TCX GPS,
+    gps_location day CSVs) -- Weight/monitoring ingest lands in later phases.
+    """
+    db_path = db_path or (Path(takeout_path) / DEFAULT_DB_FILENAME)
+    click.echo(f"Ingesting {takeout_path} -> {db_path}")
+    try:
+        counts = v2_pipeline.run_ingest(Path(takeout_path), db_path)
+    except FileNotFoundError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+
+    for source, n in counts.items():
+        click.echo(f"  {source}: {n} new rows ingested")
+
+    summary = v2_pipeline.ingest_summary(db_path)
+    click.echo("\nStaging DB totals:")
+    click.echo(f"  raw_user_exercise: {summary['raw_user_exercise']}")
+    click.echo(f"  raw_exercise_json: {summary['raw_exercise_json']}")
+    click.echo(f"  gps_point:         {summary['gps_point']} ({summary['gps_point_by_source']})")
+    click.echo(f"  tcx files with GPS: {summary['tcx_files']}")
+
+
+@cli.command()
+@click.argument("db_path", type=click.Path(exists=True, path_type=Path))
+def reconcile(db_path):
+    """[v2 rewrite] Rebuild the canonical activity table from ingested data.
+
+    Idempotent: safe to re-run after a matcher/mapping-table code change without
+    re-ingesting. Requires `fitbit2garmin ingest` to have been run first.
+    """
+    stats = v2_pipeline.run_reconcile(Path(db_path))
+    click.echo(f"Total activities: {stats['total']} (skipped: {stats['skipped']})")
+    click.echo(
+        f"  match: exact={stats['match_time_exact']} fuzzy={stats['match_time_fuzzy']} "
+        f"unmatched={stats['match_user_exercises_only']}"
+    )
+    click.echo(
+        f"  gps: tcx-exact={stats['gps_exact']} windowed={stats['gps_windowed']} "
+        f"no_data={stats['gps_flagged_no_data']} not_expected={stats['gps_not_expected']}"
+    )
+    click.echo(f"  unmapped activity types: {stats['unmapped_type']}")
+    click.echo(f"  orphan exercise_json records (not in UserExercises): {stats['orphan_exercise_json_count']}")
 
 
 def main():
