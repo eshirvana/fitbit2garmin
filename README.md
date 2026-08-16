@@ -161,46 +161,6 @@ activity type or missing GPS can always be traced back to *why*, not just
 patched around. See `fitbit2garmin/reconcile/activity_matcher.py` and the
 `fitbit2garmin-debug-activity-type` skill.
 
-## Real bugs found and fixed (not hypothetical — each caught by testing against real data and a real Garmin account)
-
-- FIT's `SessionMessage`/`LapMessage` have **no `total_steps` field** — setting
-  it silently no-ops in `fit-tool`. Steps are written as `total_strides =
-  steps // 2`, Garmin's own convention.
-- Fitbit encodes "heart rate not measured" as **`0`, not null**, on some rows —
-  writing it straight through would produce an impossible peak-below-average
-  heart rate. Handled by a dedicated resolver that treats 0 as missing.
-- Fitbit's Takeout weight values are in **pounds**, not kg, despite the API
-  being nominally metric — confirmed via `Your Profile/Profile.csv`'s
-  `weight_unit` field, not assumed.
-- Garmin's weight-CSV importer needs a **literal `Body` marker line** before the
-  header, and BMI/Fat fields must be `0`, never blank, or the whole file is
-  rejected with a generic "An error occurred with your upload" error.
-- That same CSV also broke from **mixed line endings** — Python's `csv.writer`
-  defaults to CRLF row terminators, which combined with a plain LF-terminated
-  marker line meant every field's value had a stray `\r` glued to it. A
-  line-based parser would silently misread every row. Fixed by writing plain
-  `\n`-only lines throughout, matching a real reference implementation.
-- Daily `distance` readings from Fitbit's newer export format are in
-  **meters**, not km (confirmed via the source's own readme file) — an earlier
-  draft of the daily-totals CSV exporter was overstating distance 1000×.
-- Garmin Connect's web importer **fails individual files within very large
-  batch uploads** (confirmed: a structurally valid file failed generically as
-  part of a ~3,900-file upload, succeeded uploaded alone) — hence
-  `batch-output`.
-- FIT files for sleep/HR/SpO2/HRV don't have a working manual-import path at
-  all: `sleep.fit` (`FileType.MONITORING_B`) is **rejected outright** ("Sorry,
-  your upload failed. Register your device, and try again.") — Garmin's manual
-  upload validates monitoring-type files against registered devices in a way
-  activity/weight uploads aren't subjected to. `resting_hr.fit`/`spo2.fit`/
-  `hrv.fit` (`FileType.ACTIVITY`, one mini-session per daily reading — the same
-  pattern the old codebase used) upload successfully but **each reading shows
-  up as its own fake zero-duration activity**, polluting real activity
-  history. Both confirmed against a real account. The only known workarounds
-  for the first (device/serial spoofing tools like "FIT File Faker") weren't
-  implemented here — that's circumventing a device-authenticity control, not
-  fixing a format bug. Default output for these four is a CSV archive instead
-  (`--include-fit-monitoring` re-enables the FIT path if you want it anyway).
-
 ## Known limitations
 
 - **Distance is genuinely absent for auto-detected activities.** Fitbit's
