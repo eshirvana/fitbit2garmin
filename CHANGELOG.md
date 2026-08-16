@@ -22,8 +22,9 @@ build history and `README.md` for real bugs found during development.
   Takeout export, not a generic 80-entry ID list
 - `export-weight`: FIT (confirmed working against a real account) and Garmin's
   official CSV import format (needed multiple real bug fixes)
-- `export-monitoring`: best-effort sleep/resting-HR/SpO2/HRV FIT + daily-totals
-  CSV, explicitly scoped to daily granularity to stay memory-proportionate
+- `export-monitoring`: sleep/resting-HR/SpO2/HRV as a personal-reference CSV
+  archive (not Garmin-importable — see Fixed below) + daily-totals CSV,
+  explicitly scoped to daily granularity to stay memory-proportionate
 - `batch-output`: splits large output folders into upload-sized batches —
   Garmin's web importer is confirmed unreliable with very large single-shot
   uploads
@@ -58,6 +59,15 @@ build history and `README.md` for real bugs found during development.
   non-blank fields, and broke on mixed CRLF/LF line endings
 - Daily `distance` readings are in meters, not km — an early draft of the
   daily-totals exporter overstated distance 1000×
+- `sleep.fit` is rejected outright by Garmin Connect's manual import ("Sorry,
+  your upload failed. Register your device, and try again.") — monitoring-type
+  FIT files are validated against registered devices, unlike activity/weight
+  uploads. `resting_hr.fit`/`spo2.fit`/`hrv.fit` upload successfully but each
+  daily reading pollutes the user's real activity history as a fake
+  zero-duration activity. Both confirmed against a real account; fixed by
+  defaulting `export-monitoring` to a personal-reference CSV archive instead
+  (`--include-fit-monitoring` re-enables the FIT path for anyone who wants it
+  despite the above)
 
 ## [1.1.0] - 2025-07-15
 

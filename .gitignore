@@ -133,11 +133,13 @@ CLAUDE.md
 claude.md
 Claude.md
 
-# Output directories
-output/
-test_output/
-garmin_data/
-exports/
+# Output directories (anchored to repo root -- unanchored "output/" previously
+# also matched fitbit2garmin/output/, the source module, silently excluding it
+# from every commit; found and fixed 2026-08-16)
+/output/
+/test_output/
+/garmin_data/
+/exports/
 
 # v2 rewrite: staging DB and real-data test fixtures never get committed
 *.sqlite3

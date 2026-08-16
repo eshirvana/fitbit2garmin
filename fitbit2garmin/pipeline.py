@@ -18,7 +18,7 @@ from .ingest import (
     user_exercises,
     weight_json,
 )
-from .output import csv_garmin_import, fit_activity, fit_monitoring, fit_weight, gpx_activity, tcx_activity
+from .output import csv_archive, csv_garmin_import, fit_activity, fit_monitoring, fit_weight, gpx_activity, tcx_activity
 from .reconcile import activity_matcher
 
 logger = logging.getLogger(__name__)
@@ -104,11 +104,25 @@ def export_monitoring_fit(db_path: Path, output_dir: Path) -> dict:
     return results
 
 
+def export_monitoring_archive(db_path: Path, output_dir: Path) -> dict:
+    """Personal-reference CSV export (not Garmin-importable) -- the default
+    monitoring-data deliverable, replacing the FIT path after confirming it
+    either fails outright (sleep) or pollutes the user's real activity history
+    (resting HR/SpO2/HRV) -- see output/csv_archive.py for the full story."""
+    conn = open_db(db_path)
+    results = csv_archive.write_all(conn, output_dir)
+    conn.close()
+    return results
+
+
 def export_daily_totals_csv(
     db_path: Path, output_path: Path, locale: str = "iso", units: str = "imperial",
+    sample_days: int | None = None,
 ) -> tuple[Path, int]:
     conn = open_db(db_path)
-    path, n = csv_garmin_import.write_daily_totals_csv(conn, output_path, locale=locale, units=units)
+    path, n = csv_garmin_import.write_daily_totals_csv(
+        conn, output_path, locale=locale, units=units, sample_days=sample_days
+    )
     conn.close()
     return path, n
 

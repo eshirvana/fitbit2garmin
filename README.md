@@ -18,9 +18,9 @@ full build history and every real bug found along the way.
 - **Never talks to Garmin's or Fitbit's servers.** No API keys, no OAuth, no
   upload automation. You control every import.
 - Activities are the priority: correct sport type, GPS, and full detail. Weight
-  is next. Sleep/HR/SpO2/HRV/daily-totals are explicitly best-effort — Garmin
-  Connect's dashboard is independently documented as often not displaying
-  wellness data even after a successful upload.
+  is next. Sleep/HR/SpO2/HRV are exported as a personal-reference CSV archive
+  only — the FIT import path was tried against a real Garmin Connect account
+  and confirmed to make things worse, not better (see Status below).
 
 ## Status (as of this rewrite)
 
@@ -30,7 +30,7 @@ full build history and every real bug found along the way.
 | Weight/BMI/body-fat (FIT) | ✅ Confirmed working against a real Garmin Connect account |
 | Weight/BMI/body-fat (CSV) | ⚠️ Real bugs found and fixed (see below); not re-tested since FIT worked first |
 | Daily totals CSV (steps/calories/distance/floors/active-minutes) | ⚠️ Format confirmed from a real reference implementation's source, not yet tested against Garmin |
-| Sleep / resting-HR / SpO2 / HRV (FIT) | ⚠️ Best-effort — structurally valid, no guarantee Garmin displays it |
+| Sleep / Resting HR / SpO2 / HRV (any format) | ❌ **Confirmed: Garmin's import tool cannot genuinely import this data at all**, regardless of format — see below. CSV archive (personal reference only, never intended to import) is the practical end state. |
 
 ## Installation
 
@@ -103,9 +103,34 @@ fitbit2garmin export-monitoring path/to/Takeout --output-dir ./output
 Steps/calories/distance/floors are aggregated to **daily sums** (the source
 files are minute-level; storing every reading would reproduce the exact
 15GB+/19M-row memory problem this project was explicitly designed to avoid, for
-data that's lowest priority to begin with). Sleep gets per-stage detail when
-available. All FIT output is chunked at 65,535 records per file (a real FIT
-format limit — UINT16 message counts).
+data that's lowest priority to begin with).
+
+Default output: `daily_totals_garmin_import.csv` (Garmin's official CSV format)
+plus `sleep_archive.csv`/`resting_hr_archive.csv`/`spo2_archive.csv`/
+`hrv_archive.csv` — **personal-reference CSVs, not Garmin-importable, and not
+intended to be**. Open them in a spreadsheet if you want to look at your
+history; don't try to import them.
+
+**Conclusion, after testing every path against a real Garmin Connect account**:
+there is no way to get historical sleep, resting HR, SpO2, or HRV data into
+Garmin Connect via manual import, in any format. This isn't a gap this project
+can engineer around:
+- `sleep.fit` (`FileType.MONITORING_B`) is rejected outright by Garmin's
+  server ("Sorry, your upload failed. Register your device, and try again.")
+  — a device-authenticity check, not a format issue.
+- `resting_hr.fit`/`spo2.fit`/`hrv.fit` (`FileType.ACTIVITY`, one fake
+  mini-session per daily reading) upload "successfully" but only by disguising
+  each reading as an activity, polluting your real activity history rather
+  than actually populating Garmin's Sleep/HRV/SpO2 dashboards.
+- The CSV archive files were never formatted for Garmin's importer at all —
+  confirmed to do nothing when uploaded, as expected.
+- Garmin's own "Import Data From Fitbit" documentation only ever mentions
+  activities, body composition, and daily activity totals as importable —
+  sleep/HRV/SpO2 are conspicuously absent, consistent with everything above.
+
+The FIT path is still available via `--include-fit-monitoring` if you want to
+experiment despite this, but treat it as confirmed non-functional, not
+best-effort.
 
 ### Other commands
 
@@ -151,33 +176,6 @@ schemes), with every match candidate logged — not just the winner — so a wro
 activity type or missing GPS can always be traced back to *why*, not just
 patched around. See `fitbit2garmin/reconcile/activity_matcher.py` and the
 `fitbit2garmin-debug-activity-type` skill.
-
-## Real bugs found and fixed (not hypothetical — each caught by testing against real data and a real Garmin account)
-
-- FIT's `SessionMessage`/`LapMessage` have **no `total_steps` field** — setting
-  it silently no-ops in `fit-tool`. Steps are written as `total_strides =
-  steps // 2`, Garmin's own convention.
-- Fitbit encodes "heart rate not measured" as **`0`, not null**, on some rows —
-  writing it straight through would produce an impossible peak-below-average
-  heart rate. Handled by a dedicated resolver that treats 0 as missing.
-- Fitbit's Takeout weight values are in **pounds**, not kg, despite the API
-  being nominally metric — confirmed via `Your Profile/Profile.csv`'s
-  `weight_unit` field, not assumed.
-- Garmin's weight-CSV importer needs a **literal `Body` marker line** before the
-  header, and BMI/Fat fields must be `0`, never blank, or the whole file is
-  rejected with a generic "An error occurred with your upload" error.
-- That same CSV also broke from **mixed line endings** — Python's `csv.writer`
-  defaults to CRLF row terminators, which combined with a plain LF-terminated
-  marker line meant every field's value had a stray `\r` glued to it. A
-  line-based parser would silently misread every row. Fixed by writing plain
-  `\n`-only lines throughout, matching a real reference implementation.
-- Daily `distance` readings from Fitbit's newer export format are in
-  **meters**, not km (confirmed via the source's own readme file) — an earlier
-  draft of the daily-totals CSV exporter was overstating distance 1000×.
-- Garmin Connect's web importer **fails individual files within very large
-  batch uploads** (confirmed: a structurally valid file failed generically as
-  part of a ~3,900-file upload, succeeded uploaded alone) — hence
-  `batch-output`.
 
 ## Known limitations
 

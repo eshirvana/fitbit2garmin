@@ -196,3 +196,84 @@ def test_gps_location_csv_fallback_source_has_no_cumulative_distance(conn):
 
     assert report["points_written"] == 3
     assert records[-1].distance > 0
+
+
+def test_activity_detail_fields_roundtrip_for_walking(conn):
+    # Regression test for a real bug: avg_running_cadence silently doesn't
+    # survive encode/decode for non-RUNNING sports (confirmed by direct
+    # testing against fit-tool) -- must use the generic avg_cadence field.
+    _insert_activity(
+        conn, "ue:10",
+        activity_name_raw="Outdoor Walk",
+        fit_sport=Sport.WALKING.value, fit_sub_sport=SubSport.CASUAL_WALKING.value,
+        distance_m=2000.0, duration_s=1600,
+        avg_speed_ms=1.25, avg_cadence=48,
+        time_in_hr_zone_json='[0, 240, 900, 720]',
+        source_device="Blaze",
+    )
+    fit_bytes, _ = build_activity_fit(conn, "ue:10")
+    decoded = FitFile.from_bytes(fit_bytes)
+    session = [r.message for r in decoded.records if r.message.__class__.__name__ == "SessionMessage"][0]
+    file_id = [r.message for r in decoded.records if r.message.__class__.__name__ == "FileIdMessage"][0]
+
+    assert session.avg_speed == pytest.approx(1.25, abs=0.01)
+    assert session.avg_cadence == 48
+    assert session.time_in_hr_zone == [0.0, 240.0, 900.0, 720.0]
+    assert file_id.product_name == "Blaze"
+
+
+def test_activity_detail_fields_roundtrip_for_running(conn):
+    _insert_activity(
+        conn, "ue:11",
+        activity_name_raw="Outdoor Run",
+        fit_sport=Sport.RUNNING.value, fit_sub_sport=SubSport.STREET.value,
+        avg_speed_ms=2.8, avg_cadence=81,
+    )
+    fit_bytes, _ = build_activity_fit(conn, "ue:11")
+    decoded = FitFile.from_bytes(fit_bytes)
+    session = [r.message for r in decoded.records if r.message.__class__.__name__ == "SessionMessage"][0]
+
+    assert session.avg_speed == pytest.approx(2.8, abs=0.01)
+    assert session.avg_cadence == 81
+
+
+def test_no_source_device_falls_back_to_tool_name(conn):
+    _insert_activity(conn, "ue:12", source_device=None)
+    fit_bytes, _ = build_activity_fit(conn, "ue:12")
+    decoded = FitFile.from_bytes(fit_bytes)
+    file_id = [r.message for r in decoded.records if r.message.__class__.__name__ == "FileIdMessage"][0]
+    assert file_id.product_name == "Fitbit2Garmin"
+
+
+def test_corrupt_optional_field_does_not_drop_the_whole_point(conn):
+    # A code-review-caught regression: a bad value in an OPTIONAL field
+    # (heart_rate here) must not skip the point/RecordMessage entirely -- FIT
+    # record count for a GPS activity must always equal the activity_gps_point
+    # row count. Required fields (timestamp/lat/lon) are NOT NULL in the schema
+    # and always written by this project's own ingest code, so only optional
+    # fields are realistic failure points.
+    _insert_activity(conn, "ue:6", gps_source="tcx", gps_confidence="exact")
+    for seq, (t, lat, lon, hr) in enumerate([
+        ("2020-06-15T14:00:00Z", 45.0, -73.0, "not-a-number"),
+        ("2020-06-15T14:00:10Z", 45.001, -73.001, 140),
+    ]):
+        cur = conn.execute(
+            """INSERT INTO gps_point
+               (source, source_file, source_key, point_time_utc, latitude, longitude, heart_rate, sequence_in_source)
+               VALUES ('tcx', 'fixture.csv', 'k', ?, ?, ?, ?, ?)""",
+            (t, lat, lon, hr, seq),
+        )
+        conn.execute(
+            "INSERT INTO activity_gps_point (activity_uid, gps_point_id, seq) VALUES (?, ?, ?)",
+            ("ue:6", cur.lastrowid, seq),
+        )
+    conn.commit()
+
+    fit_bytes, report = build_activity_fit(conn, "ue:6")
+    decoded = FitFile.from_bytes(fit_bytes)
+    records = [r.message for r in decoded.records if r.message.__class__.__name__ == "RecordMessage"]
+
+    # Both points got a RecordMessage despite the first having an unparseable HR.
+    assert report["points_written"] == 2
+    assert len(records) == 2
+    assert records[1].heart_rate == 140

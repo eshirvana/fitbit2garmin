@@ -5,9 +5,12 @@ plan exactly -- see PROGRESS.md for the numbered steps this maps to.
 """
 
 import bisect
+import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
+
+from fit_tool.profile.profile_type import Sport
 
 from . import gps_attacher
 from .activity_type_map import apply_gps_refinement, resolve_sport
@@ -23,6 +26,10 @@ _DISTANCE_UNIT_TO_METERS = {
     "Meter": 1.0,
 }
 
+# Cadence (steps/duration) only means something for these sports -- matches the
+# old codebase's restriction, avoiding a nonsensical "cadence" on e.g. Tennis.
+_CADENCE_SPORTS = {Sport.RUNNING.value, Sport.WALKING.value, Sport.HIKING.value}
+
 
 def _parse_utc(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -35,7 +42,7 @@ class _ExerciseJsonIndex:
         rows = conn.execute(
             """SELECT log_id, start_time_utc, duration_ms, has_gps, activity_type_id,
                       calories, steps, distance, distance_unit, average_heart_rate,
-                      elevation_gain, heart_rate_zones_json
+                      elevation_gain, heart_rate_zones_json, source_device
                FROM raw_exercise_json ORDER BY start_time_utc"""
         ).fetchall()
         self._rows = rows
@@ -89,14 +96,37 @@ def _distance_to_meters(distance: float | None, unit: str | None) -> float | Non
 def _peak_hr_from_zones(zones_json: str | None) -> int | None:
     if not zones_json:
         return None
-    import json
-
     try:
         zones = json.loads(zones_json)
     except (ValueError, TypeError):
         return None
     maxes = [z.get("max") for z in zones if z.get("max") is not None and z.get("minutes", 0) > 0]
     return max(maxes) if maxes else None
+
+
+def _time_in_hr_zone_json(zones_json: str | None) -> str | None:
+    """FIT's time_in_hr_zone is seconds-per-zone, ordered by ascending zone
+    boundary. Source has 4 zones (Out of Range/Fat Burn/Cardio/Peak), not
+    Garmin's usual 5 -- written as-is (4 elements), not padded with fake data."""
+    if not zones_json:
+        return None
+    try:
+        zones = json.loads(zones_json)
+    except (ValueError, TypeError):
+        return None
+    zones = sorted((z for z in zones if z.get("min") is not None), key=lambda z: z["min"])
+    if not zones:
+        return None
+    return json.dumps([(z.get("minutes") or 0) * 60 for z in zones])
+
+
+def _avg_cadence(steps: int | None, duration_s: int, fit_sport: int) -> int | None:
+    if steps is None or duration_s <= 0 or fit_sport not in _CADENCE_SPORTS:
+        return None
+    duration_min = duration_s / 60.0
+    if duration_min <= 0:
+        return None
+    return int(steps / duration_min / 2)  # strides/min (1 stride = 2 steps)
 
 
 def reconcile_all(conn: sqlite3.Connection) -> dict:
@@ -223,6 +253,20 @@ def reconcile_all(conn: sqlite3.Connection) -> dict:
             v is not None for v in (calories, steps, distance_m, avg_hr, peak_hr)
         ) else 0
 
+        duration_s = int((end_dt - start_dt).total_seconds())
+        # avg_speed is deliberately NOT sourced from tracker_avg_speed_mm_per_second
+        # or tracker_peak_speed_mm_per_second -- confirmed against real data that
+        # these don't hold what their names claim (avg is ~100x too large vs a
+        # distance/duration sanity check, and peak is sometimes smaller than avg,
+        # which is physically impossible). Derived from distance/duration instead,
+        # which has no unit ambiguity and matches Garmin's own definition.
+        avg_speed_ms = distance_m / duration_s if distance_m is not None and duration_s > 0 else None
+        avg_cadence = _avg_cadence(steps, duration_s, mapping.sport.value)
+        source_device = matched_ej["source_device"] if matched_ej is not None else None
+        time_in_hr_zone_json = _time_in_hr_zone_json(
+            matched_ej["heart_rate_zones_json"] if matched_ej is not None else None
+        )
+
         # --- step 9: GPS attachment ---
         has_gps_flag = bool(matched_ej["has_gps"]) if matched_ej is not None else False
         gps_result = gps_attacher.attach_gps(
@@ -244,17 +288,19 @@ def reconcile_all(conn: sqlite3.Connection) -> dict:
                (activity_uid, user_exercise_id, exercise_json_log_id, start_time_utc, end_time_utc,
                 duration_s, activity_name_raw, activity_type_id, fit_sport, fit_sub_sport, log_type,
                 has_metrics, calories, steps, distance_m, avg_heart_rate, peak_heart_rate,
-                elevation_gain_m, gps_source, gps_confidence, match_confidence, reconciliation_notes)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                elevation_gain_m, gps_source, gps_confidence, match_confidence, reconciliation_notes,
+                avg_speed_ms, avg_cadence, time_in_hr_zone_json, source_device)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 activity_uid, ue["exercise_id"], matched_ej["log_id"] if matched_ej is not None else None,
                 ue["exercise_start_utc"], ue["exercise_end_utc"],
-                int((end_dt - start_dt).total_seconds()),
+                duration_s,
                 ue["activity_name"], activity_type_id,
                 mapping.sport.value, mapping.sub_sport.value, ue["log_type"],
                 has_metrics, calories, steps, distance_m, avg_hr, peak_hr, elevation_gain_m,
                 gps_result.gps_source, gps_result.gps_confidence, match_confidence,
                 "unmapped activity type -> GENERIC/GENERIC" if was_unmapped else None,
+                avg_speed_ms, avg_cadence, time_in_hr_zone_json, source_device,
             ),
         )
 
