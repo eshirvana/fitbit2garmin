@@ -139,6 +139,15 @@ test_output/
 garmin_data/
 exports/
 
+# v2 rewrite: staging DB and real-data test fixtures never get committed
+*.sqlite3
+*.sqlite3-*
+tests/fixtures/real_slices/
+
+# Claude Code local/session state -- not shared config (skills/ IS committed)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
 # Data files
 *.json
 *.csv
