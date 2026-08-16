@@ -196,3 +196,37 @@ def test_gps_location_csv_fallback_source_has_no_cumulative_distance(conn):
 
     assert report["points_written"] == 3
     assert records[-1].distance > 0
+
+
+def test_corrupt_optional_field_does_not_drop_the_whole_point(conn):
+    # A code-review-caught regression: a bad value in an OPTIONAL field
+    # (heart_rate here) must not skip the point/RecordMessage entirely -- FIT
+    # record count for a GPS activity must always equal the activity_gps_point
+    # row count. Required fields (timestamp/lat/lon) are NOT NULL in the schema
+    # and always written by this project's own ingest code, so only optional
+    # fields are realistic failure points.
+    _insert_activity(conn, "ue:6", gps_source="tcx", gps_confidence="exact")
+    for seq, (t, lat, lon, hr) in enumerate([
+        ("2020-06-15T14:00:00Z", 45.0, -73.0, "not-a-number"),
+        ("2020-06-15T14:00:10Z", 45.001, -73.001, 140),
+    ]):
+        cur = conn.execute(
+            """INSERT INTO gps_point
+               (source, source_file, source_key, point_time_utc, latitude, longitude, heart_rate, sequence_in_source)
+               VALUES ('tcx', 'fixture.csv', 'k', ?, ?, ?, ?, ?)""",
+            (t, lat, lon, hr, seq),
+        )
+        conn.execute(
+            "INSERT INTO activity_gps_point (activity_uid, gps_point_id, seq) VALUES (?, ?, ?)",
+            ("ue:6", cur.lastrowid, seq),
+        )
+    conn.commit()
+
+    fit_bytes, report = build_activity_fit(conn, "ue:6")
+    decoded = FitFile.from_bytes(fit_bytes)
+    records = [r.message for r in decoded.records if r.message.__class__.__name__ == "RecordMessage"]
+
+    # Both points got a RecordMessage despite the first having an unparseable HR.
+    assert report["points_written"] == 2
+    assert len(records) == 2
+    assert records[1].heart_rate == 140

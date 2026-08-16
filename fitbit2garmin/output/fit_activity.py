@@ -71,7 +71,22 @@ def _load_gps_points(conn: sqlite3.Connection, activity_uid: str) -> list[sqlite
 
 def _add_gps_records(builder: FitFileBuilder, points: list[sqlite3.Row]) -> dict:
     """Returns aggregate stats (bounds, ascent/descent, distance/speed) used by
-    Lap/Session, and a `points_written` count for the QA report."""
+    Lap/Session, and a `points_written` count for the QA report.
+
+    Invariant: exactly one RecordMessage is added per point in `points` (except
+    the documented UINT16-truncation case below) -- record count must match the
+    activity_gps_point row count for a GPS activity. Required fields (timestamp,
+    lat/lon) are read from `gps_point.point_time_utc`/`latitude`/`longitude`,
+    all NOT NULL columns always written by this project's own ingest code, so
+    they're not wrapped in a try/except -- a failure there is real DB corruption
+    that should surface as a crash, not be silently absorbed as a skipped point
+    (which would violate the invariant this function exists to uphold). Optional
+    fields (altitude/distance/speed/heart_rate) each get their own try/except so
+    a bad value in one never drops the whole point -- this was collapsed into a
+    single try/except around the whole loop body in an earlier version, which
+    regressed the old codebase's more careful per-field handling and could skip
+    a point (and its RecordMessage) over a failure in a field that isn't even
+    required. Fixed here."""
     stats = {
         "points_written": 0, "points_skipped": 0,
         "start_lat": None, "start_lon": None, "end_lat": None, "end_lon": None,
@@ -94,23 +109,28 @@ def _add_gps_records(builder: FitFileBuilder, points: list[sqlite3.Row]) -> dict
     prev_lat = prev_lon = prev_ms = None
 
     for i, pt in enumerate(points):
+        # Required fields: not wrapped in try/except -- see docstring. A failure
+        # here is allowed to raise; it should never happen against our own
+        # NOT-NULL-constrained, self-written ingest data.
+        record = RecordMessage()
+        point_ms = _parse_utc_ms(pt["point_time_utc"])
+        record.timestamp = point_ms
+
+        lat, lon = float(pt["latitude"]), float(pt["longitude"])
+        record.position_lat = lat   # fit-tool accepts degrees, converts internally
+        record.position_long = lon
+
+        if stats["start_lat"] is None:
+            stats["start_lat"], stats["start_lon"] = lat, lon
+        stats["end_lat"], stats["end_lon"] = lat, lon
+        stats["min_lat"] = lat if stats["min_lat"] is None else min(stats["min_lat"], lat)
+        stats["max_lat"] = lat if stats["max_lat"] is None else max(stats["max_lat"], lat)
+        stats["min_lon"] = lon if stats["min_lon"] is None else min(stats["min_lon"], lon)
+        stats["max_lon"] = lon if stats["max_lon"] is None else max(stats["max_lon"], lon)
+
+        # Optional fields: each gets its own try/except so a bad value in one
+        # never drops the whole point (and its RecordMessage).
         try:
-            record = RecordMessage()
-            point_ms = _parse_utc_ms(pt["point_time_utc"])
-            record.timestamp = point_ms
-
-            lat, lon = float(pt["latitude"]), float(pt["longitude"])
-            record.position_lat = lat   # fit-tool accepts degrees, converts internally
-            record.position_long = lon
-
-            if stats["start_lat"] is None:
-                stats["start_lat"], stats["start_lon"] = lat, lon
-            stats["end_lat"], stats["end_lon"] = lat, lon
-            stats["min_lat"] = lat if stats["min_lat"] is None else min(stats["min_lat"], lat)
-            stats["max_lat"] = lat if stats["max_lat"] is None else max(stats["max_lat"], lat)
-            stats["min_lon"] = lon if stats["min_lon"] is None else min(stats["min_lon"], lon)
-            stats["max_lon"] = lon if stats["max_lon"] is None else max(stats["max_lon"], lon)
-
             if pt["altitude_m"] is not None:
                 alt = max(_ALT_MIN, float(pt["altitude_m"]))
                 record.altitude = alt
@@ -121,13 +141,19 @@ def _add_gps_records(builder: FitFileBuilder, points: list[sqlite3.Row]) -> dict
                         stats["total_ascent_m"] += delta
                     else:
                         stats["total_descent_m"] += -delta
+        except Exception as exc:
+            logger.warning("Skipping altitude for GPS point %d: %s", i, exc)
 
+        try:
             if pt["distance_m"] is not None:
                 cumulative_distance = float(pt["distance_m"])
             elif prev_lat is not None:
                 cumulative_distance += _haversine_m(prev_lat, prev_lon, lat, lon)
             record.distance = cumulative_distance
+        except Exception as exc:
+            logger.warning("Skipping distance for GPS point %d: %s", i, exc)
 
+        try:
             if prev_ms is not None and point_ms > prev_ms and prev_lat is not None:
                 # instantaneous speed from consecutive-point distance delta / dt
                 dt_s = (point_ms - prev_ms) / 1000.0
@@ -136,17 +162,18 @@ def _add_gps_records(builder: FitFileBuilder, points: list[sqlite3.Row]) -> dict
                     speed = min(d_delta / dt_s, _SPD_MAX)
                     record.speed = speed
                     stats["max_speed_ms"] = speed if stats["max_speed_ms"] is None else max(stats["max_speed_ms"], speed)
+        except Exception as exc:
+            logger.warning("Skipping speed for GPS point %d: %s", i, exc)
 
+        try:
             if pt["heart_rate"] is not None:
                 record.heart_rate = int(pt["heart_rate"])
-
-            builder.add(record)
-            stats["points_written"] += 1
-            prev_lat, prev_lon, prev_ms = lat, lon, point_ms
-
         except Exception as exc:
-            stats["points_skipped"] += 1
-            logger.warning("Skipping GPS point %d: %s", i, exc)
+            logger.warning("Skipping heart_rate for GPS point %d: %s", i, exc)
+
+        builder.add(record)
+        stats["points_written"] += 1
+        prev_lat, prev_lon, prev_ms = lat, lon, point_ms
 
     if points:
         stats["total_distance_m"] = cumulative_distance
@@ -207,6 +234,18 @@ def build_activity_fit(conn: sqlite3.Connection, activity_uid: str) -> tuple[byt
     gps_points = _load_gps_points(conn, activity_uid) if activity["gps_source"] != "none" else []
     if gps_points:
         gps_stats = _add_gps_records(builder, gps_points)
+        # Record count must match activity_gps_point rows for a GPS activity --
+        # see _add_gps_records' docstring. The only legitimate exception is the
+        # documented UINT16 truncation case (already logged there); anything
+        # else means the invariant was violated and should fail loudly rather
+        # than ship a file with silently missing GPS data.
+        expected = min(len(gps_points), _FIT_MAX_RECORDS_PER_FILE)
+        if gps_stats["points_written"] != expected:
+            raise RuntimeError(
+                f"GPS record-count invariant violated for {activity_uid}: "
+                f"expected {expected} RecordMessages, wrote {gps_stats['points_written']} "
+                f"(skipped {gps_stats['points_skipped']})"
+            )
     else:
         _add_minimal_records(builder, start_ms, end_ms)
         gps_stats = {"points_written": 0, "points_skipped": 0}
