@@ -30,9 +30,8 @@ full build history and every real bug found along the way.
 |---|---|
 | Activities (FIT/TCX/GPX) | ✅ Confirmed working against a real Garmin Connect account |
 | Weight/BMI/body-fat (FIT) | ✅ Confirmed working against a real Garmin Connect account |
-| Weight/BMI/body-fat (CSV) | ⚠️ Real bugs found and fixed (see below); not re-tested since FIT worked first |
-| Daily totals CSV (steps/calories/distance/floors/active-minutes) | ❌ **Confirmed not importable** — fails with Garmin's generic "An error occurred with your upload" error even after fixing every known formatting issue (marker line, blank fields, line endings, zero-step-day filtering). Root cause of this specific failure is unidentified — use `output/daily_totals_garmin_import.csv` as a personal reference only, not an import path. |
-| Sleep / Resting HR / SpO2 / HRV (any format) | ❌ **Confirmed: Garmin's import tool cannot genuinely import this data at all**, regardless of format — see below. CSV archive (personal reference only, never intended to import) is the practical end state. |
+| Daily totals CSV (steps/calories/distance/floors/active-minutes) | ❌ **Confirmed not importable** — use `output/daily_totals_garmin_import.csv` as a personal reference only, not an import path. |
+| Sleep / Resting HR / SpO2 / HRV (any format) | ❌ **Confirmed not importable** — CSV archive (personal reference only, never intended to import) is the practical end state. |
 
 ## Installation
 
