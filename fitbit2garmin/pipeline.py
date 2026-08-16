@@ -117,9 +117,12 @@ def export_monitoring_archive(db_path: Path, output_dir: Path) -> dict:
 
 def export_daily_totals_csv(
     db_path: Path, output_path: Path, locale: str = "iso", units: str = "imperial",
+    sample_days: int | None = None,
 ) -> tuple[Path, int]:
     conn = open_db(db_path)
-    path, n = csv_garmin_import.write_daily_totals_csv(conn, output_path, locale=locale, units=units)
+    path, n = csv_garmin_import.write_daily_totals_csv(
+        conn, output_path, locale=locale, units=units, sample_days=sample_days
+    )
     conn.close()
     return path, n
 

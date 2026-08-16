@@ -117,6 +117,7 @@ _DAILY_METRIC_TYPES = (
 
 def write_daily_totals_csv(
     conn: sqlite3.Connection, output_path: Path, locale: str = "iso", units: str = "imperial",
+    sample_days: int | None = None,
 ) -> tuple[Path, int]:
     by_date: dict[str, dict[str, float]] = {}
     for metric_type in _DAILY_METRIC_TYPES:
@@ -125,6 +126,10 @@ def write_daily_totals_csv(
         ).fetchall():
             date = row["ts_utc"][:10]
             by_date.setdefault(date, {})[metric_type] = row["value"]
+
+    if sample_days:
+        earliest_dates = sorted(by_date)[:sample_days]
+        by_date = {d: by_date[d] for d in earliest_dates}
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", newline="\n") as f:

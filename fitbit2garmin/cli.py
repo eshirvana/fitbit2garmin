@@ -286,6 +286,12 @@ def export_weight(takeout_path, db_path, output_dir, fmt, locale, units, sample_
 )
 @click.option("--units", type=click.Choice(["imperial", "metric"]), default="imperial")
 @click.option(
+    "--sample-days", type=int, default=None,
+    help="Validation mode: only export the first N days of daily-totals data (steps/calories/"
+         "distance/floors/active-minutes -> Garmin Intensity Minutes on import), to test-import "
+         "via Garmin Connect before exporting the full history. Does not affect the CSV archive.",
+)
+@click.option(
     "--include-fit-monitoring", is_flag=True,
     help="Also generate sleep.fit/resting_hr.fit/spo2.fit/hrv.fit -- OFF by default. "
          "CONFIRMED PROBLEMATIC against a real Garmin Connect account: sleep.fit is rejected "
@@ -293,17 +299,19 @@ def export_weight(takeout_path, db_path, output_dir, fmt, locale, units, sample_
          "but each daily reading shows up as a separate fake zero-duration activity, polluting "
          "your real activity history. Only use this if you understand and accept that.",
 )
-def export_monitoring(takeout_path, db_path, output_dir, locale, units, include_fit_monitoring):
+def export_monitoring(takeout_path, db_path, output_dir, locale, units, sample_days, include_fit_monitoring):
     """Export sleep/HR/SpO2/HRV/daily-totals -- BEST-EFFORT, lowest priority.
 
     Default output is a personal-reference CSV archive (sleep/resting-HR/SpO2/
     HRV) -- NOT importable into Garmin Connect, but doesn't risk breaking
     anything either. The daily-totals CSV (steps/calories/distance/floors/
-    active-minutes) uses Garmin's official "Import Data From Fitbit" format and
-    may actually import correctly, similar to the confirmed-working weight.fit
-    path, but is itself not yet user-confirmed. See --include-fit-monitoring's
-    help text before using it -- the FIT path for sleep/HR/SpO2/HRV was tried
-    against a real account and confirmed to make things worse, not better.
+    active-minutes -- Garmin's own docs describe converting the active-minutes
+    columns to "Intensity Minutes" on import) uses Garmin's official "Import
+    Data From Fitbit" format and may actually import correctly, similar to the
+    confirmed-working weight.fit path, but is itself not yet user-confirmed.
+    See --include-fit-monitoring's help text before using it -- the FIT path
+    for sleep/HR/SpO2/HRV was tried against a real account and confirmed to
+    make things worse, not better.
     """
     db_path = Path(db_path) if db_path else Path(takeout_path) / DEFAULT_DB_FILENAME
     output_dir = Path(output_dir)
@@ -316,8 +324,13 @@ def export_monitoring(takeout_path, db_path, output_dir, locale, units, include_
         if n:
             click.echo(f"   {k}: {n} new rows")
 
-    csv_path, n_days = pipeline.export_daily_totals_csv(db_path, output_dir / "daily_totals_garmin_import.csv", locale=locale, units=units)
+    csv_path, n_days = pipeline.export_daily_totals_csv(
+        db_path, output_dir / "daily_totals_garmin_import.csv", locale=locale, units=units, sample_days=sample_days
+    )
     click.echo(f"\n✅ Wrote {n_days} days to {csv_path} (Garmin's official CSV import format)")
+    if sample_days:
+        click.echo(f"   Validation mode: first {sample_days} days only. Test-import this via Garmin")
+        click.echo("   Connect's 'Import Data From Fitbit' wizard before re-running without --sample-days.")
 
     archive_results = pipeline.export_monitoring_archive(db_path, output_dir)
     for name, (path, n) in archive_results.items():

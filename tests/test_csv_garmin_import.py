@@ -89,3 +89,22 @@ def test_daily_totals_distance_unit_conversion(conn, tmp_path):
     line2 = [l for l in path2.read_text().split("\n") if l.startswith("2020-06-15")][0]
     distance_field2 = line2.split(",")[3]
     assert float(distance_field2) == pytest.approx(8.0 * 0.621371, abs=0.01)  # miles
+
+
+def test_daily_totals_sample_days_limits_to_earliest_dates(conn, tmp_path):
+    for date in ("2020-06-10", "2020-06-11", "2020-06-12", "2020-06-20"):
+        conn.execute(
+            "INSERT INTO monitoring_metric (metric_type, source_file, ts_utc, value) "
+            "VALUES ('steps_daily', 'fixture.json', ?, 5000)",
+            (f"{date}T00:00:00Z",),
+        )
+    conn.commit()
+
+    path, n = write_daily_totals_csv(conn, tmp_path / "daily.csv", sample_days=2)
+    content = path.read_text()
+
+    assert n == 2
+    assert "2020-06-10" in content
+    assert "2020-06-11" in content
+    assert "2020-06-12" not in content
+    assert "2020-06-20" not in content
