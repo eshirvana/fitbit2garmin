@@ -98,6 +98,11 @@ re-tested against Garmin since FIT worked.
 
 ### Sleep / HR / SpO2 / HRV / daily totals (personal reference only — not importable)
 
+> ⚠️ **None of this data can currently be imported into Garmin Connect.** Every
+> path was tried against a real account (CSV and FIT) and every one failed or
+> actively made things worse — see the Conclusion below for specifics. This
+> command is useful for a personal-reference export, not a Garmin import.
+
 ```bash
 fitbit2garmin export-monitoring path/to/Takeout --output-dir ./output
 ```
